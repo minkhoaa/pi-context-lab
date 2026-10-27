@@ -286,8 +286,12 @@ def run_single_worker(
     shutil.copytree(fixture_dir, ws_dir)
 
     # 2. Session dir setup
-    session_dir = Path(prof.get("session_dir"))
-    session_dir.mkdir(parents=True, exist_ok=True)
+    # Unique session directory per RUN. Bare -c on a shared profile directory
+    # can continue a different repetition, violating benchmark independence.
+    session_dir = Path(prof.get("session_dir")) / f"{run_id}_{pid}_{tid}_r{rep}"
+    if session_dir.exists():
+        raise RuntimeError(f"Refusing to reuse existing benchmark session: {session_dir}")
+    session_dir.mkdir(parents=True, exist_ok=False)
 
     # 3. Environment configuration
     env = os.environ.copy()
@@ -325,7 +329,7 @@ def run_single_worker(
             "--thinking", model_lock.get("thinking", "max"),
             "--mode", "json",
             "-p",
-            "--session-dir", prof.get("session_dir"),
+            "--session-dir", str(session_dir),
         ]
         if t_idx > 0:
             cmd.append("-c")
@@ -474,6 +478,7 @@ def run_single_worker(
     summary["wall_clock_duration_seconds"] = round(run_duration, 2)
     summary["evaluation"] = eval_result
     summary["optimization_status"] = opt_status
+    summary["telemetry_reconciliation_status"] = "REQUIRES_RAW_EXTENSION_EVENT_PROVENANCE" if pid in ("P2", "P3") else "PRIMARY_USAGE_CAPTURED"
     summary["turn_summaries"] = turn_summaries
 
     # Save summary
@@ -528,9 +533,10 @@ def generate_pilot_report(results: List[Dict[str, Any]]) -> str:
     lines.append(f"| **Cache-Write Tokens** | {run_a.get('cache_write_tokens', 0):,} | {run_p1.get('cache_write_tokens', 0):,} | {run_p2.get('cache_write_tokens', 0):,} | {run_p3.get('cache_write_tokens', 0):,} |")
     lines.append(f"| **Secondary Requests (Summarizer)** | 0 | 0 | {run_p2.get('secondary_metrics', {}).get('secondary_requests', 0)} | 0 |")
     lines.append(f"| **Secondary Tokens** | 0 | 0 | In: {run_p2.get('secondary_metrics', {}).get('secondary_input_tokens', 0):,}, Out: {run_p2.get('secondary_metrics', {}).get('secondary_output_tokens', 0):,} | 0 |")
-    lines.append(f"| **Secondary Cost** | $0.000000 | $0.000000 | ${run_p2.get('secondary_metrics', {}).get('secondary_cost', 0):.6f} | $0.000000 |")
-    lines.append(f"| **Primary Model Cost** | ${run_a.get('calculated_cost', 0):.6f} | ${run_p1.get('calculated_cost', 0):.6f} | ${run_p2.get('calculated_cost', 0):.6f} | ${run_p3.get('calculated_cost', 0):.6f} |")
-    lines.append(f"| **Net End-to-End Cost** | **${run_a.get('net_end_to_end_cost', run_a.get('calculated_cost', 0)):.6f}** | **${run_p1.get('net_end_to_end_cost', run_p1.get('calculated_cost', 0)):.6f}** | **${run_p2.get('net_end_to_end_cost', run_p2.get('calculated_cost', 0)):.6f}** | **${run_p3.get('net_end_to_end_cost', run_p3.get('calculated_cost', 0)):.6f}** |")
+    lines.append(f"| **Secondary Reported Cost** | 0 | 0 | {run_p2.get('secondary_metrics', {}).get('secondary_cost')} | 0 |")
+    lines.append("| **Primary Pi-Reported Cost** | " + " | ".join(str(r.get("primary_reported_cost")) for r in [run_a, run_p1, run_p2, run_p3]) + " |")
+    lines.append("| **Net Reported Estimate** | " + " | ".join(str(r.get("net_end_to_end_cost")) if r.get("net_end_to_end_cost") is not None else "UNVERIFIED" for r in [run_a, run_p1, run_p2, run_p3]) + " |")
+    lines.append("| **Cost Status** | " + " | ".join(str(r.get("cost_status", "UNVERIFIED")) for r in [run_a, run_p1, run_p2, run_p3]) + " |")
     lines.append(f"| **Wall Duration (s)** | {run_a.get('wall_clock_duration_seconds', 0)}s | {run_p1.get('wall_clock_duration_seconds', 0)}s | {run_p2.get('wall_clock_duration_seconds', 0)}s | {run_p3.get('wall_clock_duration_seconds', 0)}s |")
     lines.append(f"| **Recovery / Retrieve Calls** | 0 | {run_p1.get('optimization_metrics', {}).get('recovery_calls', 0)} | {run_p2.get('optimization_metrics', {}).get('recovery_calls', 0)} | 0 |")
     lines.append("\n---\n")
@@ -544,13 +550,13 @@ def generate_pilot_report(results: List[Dict[str, Any]]) -> str:
 
     lines.append("\n### 3.2 Profile A vs Profile P2 (pi-context-prune)")
     lines.append("- Context Prune uses a batch-based summarizer (`agent-message`) with thinking `low`.")
-    lines.append(f"- Secondary summarizer requests: {run_p2.get('secondary_metrics', {}).get('secondary_requests', 0)} calls, incurring ${run_p2.get('secondary_metrics', {}).get('secondary_cost', 0):.6f} extra model spend.")
-    lines.append(f"- Net end-to-end cost: ${run_p2.get('net_end_to_end_cost', 0):.6f} vs Baseline ${run_a.get('net_end_to_end_cost', 0):.6f}.")
+    lines.append(f"- Secondary summarizer requests: {run_p2.get('secondary_metrics', {}).get('secondary_requests', 0)}. Reported-cost provenance: {run_p2.get('secondary_metrics', {}).get('secondary_cost_provenance') or 'UNAVAILABLE'}.")
+    lines.append(f"- Net end-to-end cost: {run_p2.get('net_end_to_end_cost') if run_p2.get('net_end_to_end_cost') is not None else 'UNVERIFIED'} vs Baseline {run_a.get('net_end_to_end_cost')}.")
 
     lines.append("\n### 3.3 Profile A vs Profile P3 (Pi DCP)")
     lines.append("- Pi DCP applies dynamic deduplication and error purging on `context` events without secondary model calls.")
     lines.append(f"- In this pilot, P3 achieved Peak Context of {run_p3.get('peak_input_context', 0):,} and Cumulative Context of {run_p3.get('cumulative_input_context', 0):,}.")
-    lines.append(f"- Net end-to-end cost: ${run_p3.get('net_end_to_end_cost', 0):.6f} vs Baseline ${run_a.get('net_end_to_end_cost', 0):.6f}.")
+    lines.append(f"- Net end-to-end cost: {run_p3.get('net_end_to_end_cost') if run_p3.get('net_end_to_end_cost') is not None else 'UNVERIFIED'} vs Baseline {run_a.get('net_end_to_end_cost')}.")
 
     lines.append("\n---\n")
     lines.append("## 4. Multi-Criteria Pilot Rankings\n")
@@ -566,8 +572,9 @@ def generate_pilot_report(results: List[Dict[str, Any]]) -> str:
 
     # 2. Cost per task
     lines.append("\n2. **Net End-to-End Cost:**")
-    for r in sorted(ready_runs, key=lambda x: x.get('net_end_to_end_cost', float('inf'))):
-        lines.append(f"   - **{r.get('profile_name')} ({r.get('profile_id')}):** ${r.get('net_end_to_end_cost', 0):.6f}")
+    for r in sorted(ready_runs, key=lambda x: x.get("net_end_to_end_cost") if isinstance(x.get("net_end_to_end_cost"), (int, float)) else float("inf")):
+        c = r.get("net_end_to_end_cost")
+        lines.append(f"   - **{r.get('profile_name')} ({r.get('profile_id')}):** " + (f"${c:.6f}" if isinstance(c, (int, float)) else "UNVERIFIED (exclude from ranking)"))
 
     # 3. Peak Context
     lines.append("\n3. **Peak Input Context (Lowest Window Pressure):**")
@@ -601,7 +608,7 @@ def generate_pilot_report(results: List[Dict[str, Any]]) -> str:
     lines.append("## 6. Recommendations for Full Benchmark Matrix\n")
     lines.append("1. **Single-Repetition Caveat:** These results represent repetition 1 on Task L. Statistical variance across network latency and model reasoning paths requires the full 3-repetition Latin Square matrix before declaring absolute efficiency.\n")
     lines.append("2. **Secondary Model Budgeting:** The secondary model costs in P2 must remain explicitly accounted for in all reporting to prevent masking summarizer overhead.\n")
-    lines.append("3. **Proceed to Full Matrix:** All ready candidates (A, P1, P2, P3) demonstrated runtime compatibility and stability under heavy tool pressure.\n")
+    lines.append("3. **HOLD:** Do not proceed to full matrix until cost provenance and optimizer events have been independently reconciled, and an evaluator with immutable external tests has passed.\n")
 
     content = "\n".join(lines)
     with open(report_file, "w", encoding="utf-8") as f:
