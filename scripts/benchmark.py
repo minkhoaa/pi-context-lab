@@ -159,7 +159,7 @@ def get_profile_by_id(profiles_dict: Dict[str, Any], profile_id: str) -> Dict[st
     raise ValueError(f"Unknown profile ID: {profile_id}")
 
 
-def generate_pilot_schedule() -> List[Dict[str, Any]]:
+def generate_pilot_schedule(repetitions: int = 1) -> List[Dict[str, Any]]:
     """
     Generate the 4 planned pilot sessions strictly on Task L:
     1. A: Baseline
@@ -168,12 +168,12 @@ def generate_pilot_schedule() -> List[Dict[str, Any]]:
     4. P3: DCP
     Sequential execution only. Task L multi-turn (4 turns).
     """
-    return [
-        {"run_id": "pilot-01", "profile_id": "A", "task_id": "task-l", "rep": 1},
-        {"run_id": "pilot-02", "profile_id": "P1", "task_id": "task-l", "rep": 1},
-        {"run_id": "pilot-03", "profile_id": "P2", "task_id": "task-l", "rep": 1},
-        {"run_id": "pilot-04", "profile_id": "P3", "task_id": "task-l", "rep": 1},
-    ]
+    profiles = ("A", "P1", "P2", "P3")
+    return [{"run_id": f"pilot-v2-r{rep}-{idx+1:02d}",
+             "profile_id": profiles[(idx+rep-1) % len(profiles)],
+             "task_id":"task-l", "rep":rep}
+            for rep in range(1, repetitions+1)
+            for idx in range(len(profiles))]
 
 
 def cmd_dry_run(args) -> int:
@@ -648,7 +648,11 @@ def cmd_run(args) -> int:
     env_lock = load_json(ENV_LOCK_FILE)
     prompts_manifest = load_json(PROMPTS_MANIFEST_FILE)
 
-    schedule = generate_pilot_schedule() if is_pilot else generate_schedule(num_reps=3)
+    repetitions = getattr(args, "repetitions", 0)
+    if is_pilot and repetitions < 1:
+        print("ERROR: specify --repetitions N for fresh pilot; original four-run pilot is immutable.")
+        return 2
+    schedule = generate_pilot_schedule(repetitions) if is_pilot else generate_schedule(num_reps=3)
     print(f"[benchmark run] Running {len(schedule)} sequential sessions ({mode} mode)...\n")
 
     results = []
@@ -657,14 +661,21 @@ def cmd_run(args) -> int:
         results.append(res)
 
     # Persist aggregated results
-    results_target = RESULTS_DIR / ("pilot-results.json" if is_pilot else "benchmark-results.json")
-    with open(results_target, "w", encoding="utf-8") as f:
+    results_target = RESULTS_DIR / (f"pilot-v2-r{repetitions}-results.json" if is_pilot else "benchmark-results.json")
+    if results_target.exists():
+        print(f"ERROR: refusing to overwrite benchmark result file: {results_target}")
+        return 3
+    with open(results_target, "x", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
     print(f"\n[benchmark run] All {len(results)} sessions completed. Results saved to {results_target}")
 
     # Generate analysis report
     if is_pilot:
-        generate_pilot_report(results)
+        report_path = REPORTS_DIR / "PILOT_BENCHMARK_ANALYSIS.md"
+        if report_path.exists():
+            print("Historical pilot report preserved. Generate fresh v2 analysis from new results.")
+        else:
+            generate_pilot_report(results)
 
     return 0
 
@@ -712,6 +723,7 @@ def main():
     run_group = run_parser.add_mutually_exclusive_group(required=True)
     run_group.add_argument("--pilot", action="store_true", help="Execute pilot run (subset of matrix)")
     run_group.add_argument("--full", action="store_true", help="Execute full 45-run counterbalanced matrix")
+    run_parser.add_argument("--repetitions", type=int, default=0, help="Fresh Task L pilot repetitions; 3 recommended")
     run_parser.add_argument(
         "--authorize-benchmark-spend",
         action="store_true",
