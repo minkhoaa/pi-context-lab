@@ -1,0 +1,49 @@
+{
+  "tasks": {
+    "task-s": {
+      "name": "Task S (Small / Fast Fix)",
+      "fixture_dir": "fixtures/task-s",
+      "evaluator": "evaluators/eval_task_s.py",
+      "turns": [
+        {
+          "turn": 1,
+          "prompt": "prompts/task-s.md"
+        }
+      ]
+    },
+    "task-l": {
+      "name": "Task L (Long / Iterative Debugging)",
+      "fixture_dir": "fixtures/task-l",
+      "evaluator": "evaluators/eval_task_l.py",
+      "turns": [
+        {
+          "turn": 1,
+          "prompt": "prompts/task-l-turn1.md"
+        },
+        {
+          "turn": 2,
+          "prompt": "prompts/task-l-turn2.md"
+        },
+        {
+          "turn": 3,
+          "prompt": "prompts/task-l-turn3.md"
+        },
+        {
+          "turn": 4,
+          "prompt": "prompts/task-l-turn4.md"
+        }
+      ]
+    },
+    "task-m": {
+      "name": "Task M (Monorepo / Multi-service Navigation)",
+      "fixture_dir": "fixtures/task-m",
+      "evaluator": "evaluators/eval_task_m.py",
+      "turns": [
+        {
+          "turn": 1,
+          "prompt": "prompts/task-m.md"
+        }
+      ]
+    }
+  }
+}

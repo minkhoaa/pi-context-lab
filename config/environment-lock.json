@@ -1,0 +1,29 @@
+{
+  "pi_version": "1.4.0",
+  "pi_binary": "/home/khoa/.local/bin/pi",
+  "node_version": "v24.21.0",
+  "npm_version": "11.19.0",
+  "os": "linux",
+  "arch": "x64",
+  "isolation_flags": [
+    "--no-extensions",
+    "--no-skills",
+    "--no-context-files",
+    "--no-prompt-templates",
+    "--no-themes",
+    "--no-mcp",
+    "--tools read,bash,edit,write",
+    "--session-dir"
+  ],
+  "env_overrides": {
+    "PI_CODING_AGENT_DIR": "isolated_per_profile",
+    "PI_CODING_AGENT_SESSION_DIR": "isolated_per_profile"
+  },
+  "forbidden_extensions": [
+    "ponytail",
+    "caveman",
+    "rtk",
+    "headroom",
+    "pi-token-bench"
+  ]
+}

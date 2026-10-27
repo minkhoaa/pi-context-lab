@@ -1,0 +1,222 @@
+{
+  "timestamp": "2026-10-27T04:25:00.000Z",
+  "environment": {
+    "node_version": "v24.21.0",
+    "pi_version": "1.4.0",
+    "platform": "linux-x64",
+    "working_directory": "/home/khoa/pi-context-lab/candidates"
+  },
+  "candidates": {
+    "@agent-context/pi-sift": {
+      "status": "NOT_READY",
+      "version": "0.0.2",
+      "license": "Apache-2.0",
+      "entry_point": "./index.ts",
+      "dependencies": {
+        "@agent-context/sift": "0.0.1"
+      },
+      "peerDependencies": {
+        "@earendil-works/pi-ai": "*",
+        "@earendil-works/pi-coding-agent": "*",
+        "typebox": "*"
+      },
+      "lifecycle_scripts": [],
+      "registered_tools": [
+        {
+          "name": "sift_retrieve",
+          "label": "Sift Retrieve",
+          "description": "Retrieve the full original tool output from the local sift stash. Call this when compressed tool output contains <<stash:KEY>> and you need the original text."
+        }
+      ],
+      "system_prompt_injections": [],
+      "storage_paths": {
+        "cache_dir": "$PI_CODING_AGENT_DIR/sift (default: ~/.pi/agent/sift)",
+        "redirection_mechanism": "Set environment variable PI_CODING_AGENT_DIR=/home/khoa/pi-context-lab/.pi-agent. Isolation enforced: directory must not reside inside worktree (assertOutsideWorktree)."
+      },
+      "network_activity": {
+        "has_network_calls": false,
+        "details": "Completely local execution. No outbound HTTP/API calls or telemetry detected."
+      },
+      "rationale": "Unbundled external dependency '@agent-context/sift' (0.0.1) is missing from the unpacked package and must be installed via npm. Once installed, native prebuilds exist for linux-x64. Entry point is raw TypeScript (index.ts) relying on Pi's TS/esm loader. In addition, SessionSiftStore enforces that the stash directory must be outside the active worktree."
+    },
+    "pi-context-prune": {
+      "status": "READY",
+      "version": "2.1.0",
+      "license": "MIT",
+      "entry_point": "./dist/index.js",
+      "dependencies": {},
+      "peerDependencies": {
+        "@earendil-works/pi-ai": "*",
+        "@earendil-works/pi-coding-agent": ">=0.86.0",
+        "@earendil-works/pi-tui": "*"
+      },
+      "lifecycle_scripts": [
+        "prepack"
+      ],
+      "registered_tools": [
+        {
+          "name": "context_tree_query",
+          "label": "Query Original Tool History",
+          "description": "Retrieve original tool call results that have been pruned from active context. Pass the short refs from a pruner-summary message to get back the full original outputs."
+        },
+        {
+          "name": "context_prune",
+          "label": "Prune Context",
+          "description": "Summarize and prune preceding tool-call results from context to reduce context size."
+        }
+      ],
+      "system_prompt_injections": [
+        {
+          "hook": "before_agent_start",
+          "condition": "When enabled and pruneOn === 'agentic-auto'",
+          "description": "Appends [Context Prune — Agentic Auto Mode] instructions to system prompt explaining when and how to prune."
+        }
+      ],
+      "storage_paths": {
+        "settings_path": "$PI_CODING_AGENT_DIR/context-prune/settings.json (default: ~/.pi/agent/context-prune/settings.json)",
+        "in_memory_session_index": "Session index stored in memory during active session",
+        "redirection_mechanism": "Set environment variable PI_CODING_AGENT_DIR=/home/khoa/pi-context-lab/.pi-agent to redirect settings.json."
+      },
+      "network_activity": {
+        "has_network_calls": true,
+        "details": "Invokes Pi's configured LLM provider via ctx.model / provider.stream(...) to summarize pruned tool call batches. Does not make unmediated third-party telemetry calls."
+      },
+      "rationale": "Zero external runtime dependencies; ships pre-bundled standalone ESM in dist/index.js. Fully compatible with Node.js 24 and Pi 1.4.0. Registers 2 tools and context manipulation hooks. Makes LLM inference calls via Pi's native model provider interface to generate summaries."
+    },
+    "@pi-vault/pi-dcp": {
+      "status": "READY",
+      "version": "0.11.0",
+      "license": "MIT",
+      "entry_point": "./src/index.ts",
+      "dependencies": {},
+      "peerDependencies": {
+        "@earendil-works/pi-agent-core": "*",
+        "@earendil-works/pi-coding-agent": "*",
+        "@earendil-works/pi-tui": "*",
+        "typebox": "*"
+      },
+      "lifecycle_scripts": [],
+      "registered_tools": [
+        {
+          "name": "compress",
+          "label": "Compress",
+          "description": "Compress conversation messages or ranges into technical summaries (message mode or range mode, defaultActive: false, sequential execution)."
+        }
+      ],
+      "system_prompt_injections": [
+        {
+          "hook": "before_agent_start",
+          "condition": "When compressionEnabled and 'compress' tool is active",
+          "description": "Injects sections.dcp into systemPromptOptions with DCP context management guidance."
+        }
+      ],
+      "storage_paths": {
+        "global_config": "$PI_CODING_AGENT_DIR/extensions/dcp.json (default: ~/.pi/agent/extensions/dcp.json)",
+        "global_prompts": "$PI_CODING_AGENT_DIR/extensions/dcp-prompts/ (defaults and overrides)",
+        "project_config": "./.pi/dcp.json and ./.pi/dcp-prompts/overrides",
+        "session_logs": "<sessionDir>/dcp/logs/<YYYY-MM-DD>.log",
+        "session_state": "Persisted in session JSONL custom entries ('pi-dcp-state')",
+        "redirection_mechanism": "Set PI_CODING_AGENT_DIR=/home/khoa/pi-context-lab/.pi-agent. Ensure project configs/prompts are contained in cwd/.pi or isolated directories."
+      },
+      "network_activity": {
+        "has_network_calls": false,
+        "details": "Pure local deterministic rule-based pruning (deduplication, purge errors, length trimming, message range compression). No external HTTP/network/telemetry calls."
+      },
+      "rationale": "Specifies engines >=24.15.0 which matches Node v24.21.0. Zero runtime dependencies (uses Pi's bundled modules and node core). Entry point is TypeScript loaded via Pi's extension loader. Fully functional, safe, and robust."
+    },
+    "pi-context-engine": {
+      "status": "NOT_READY",
+      "version": "0.7.1",
+      "license": "MIT",
+      "entry_point": "src/extension.ts",
+      "dependencies": {
+        "better-sqlite3": "^13.0.3",
+        "sqlite-vec": "^0.1.9",
+        "tree-sitter-wasms": "^0.1.13",
+        "web-tree-sitter": "^0.22.6",
+        "yaml": "^2.9.1"
+      },
+      "optionalDependencies": {
+        "@huggingface/transformers": "^4.3.1"
+      },
+      "peerDependencies": {
+        "@earendil-works/pi-ai": "*",
+        "@earendil-works/pi-coding-agent": "*",
+        "typebox": "*"
+      },
+      "lifecycle_scripts": [
+        "prepublishOnly"
+      ],
+      "registered_tools": [
+        {
+          "name": "context_search",
+          "label": "Context Search",
+          "description": "Semantic code search over project index (tree-sitter chunks, hybrid vector + BM25)."
+        },
+        {
+          "name": "expand_chunk",
+          "label": "Expand Chunk",
+          "description": "Get full original source for a compressed search result."
+        },
+        {
+          "name": "related_context",
+          "label": "Related Context",
+          "description": "Find code related to a chunk via graph edges."
+        },
+        {
+          "name": "session_recall",
+          "label": "Session Recall",
+          "description": "Recall past decisions, code-area notes, and turn summaries by topic."
+        },
+        {
+          "name": "session_timeline",
+          "label": "Session Timeline",
+          "description": "List turn summaries for a session, oldest first."
+        },
+        {
+          "name": "session_event",
+          "label": "Session Event",
+          "description": "Return raw captured input/output for one tool event."
+        },
+        {
+          "name": "record_decision",
+          "label": "Record Decision",
+          "description": "Record a decision and reason for future sessions."
+        },
+        {
+          "name": "record_code_area",
+          "label": "Record Code Area",
+          "description": "Record a file description for future session recall."
+        },
+        {
+          "name": "index_status",
+          "label": "Index Status",
+          "description": "Check index health, chunk count, and token savings."
+        },
+        {
+          "name": "reindex",
+          "label": "Reindex",
+          "description": "Re-index the project or a single path."
+        }
+      ],
+      "system_prompt_injections": [
+        {
+          "hook": "before_agent_start",
+          "condition": "When context_search is active and guidance.enabled is true",
+          "description": "Injects sections.context_search_guidelines (~900 tokens) with effective query-writing instructions."
+        }
+      ],
+      "storage_paths": {
+        "global_config_dir": "~/.pi-context-engine/ (config.yaml, pricing_cache.json, models/)",
+        "project_storage_base": "~/.pi-context-engine/projects/<project-slug>/ (manifest.json, stats.json, graph.db, embedding_cache.db, fts/, vectors/, sessions/)",
+        "project_config": "./.context-engine.yaml",
+        "redirection_mechanism": "Configure storage.path in ~/.pi-context-engine/config.yaml or ./.context-engine.yaml to point to /home/khoa/pi-context-lab/storage, and set PCE_TRANSFORMERS_CACHE=/home/khoa/pi-context-lab/models."
+      },
+      "network_activity": {
+        "has_network_calls": true,
+        "details": "1) Fetches live Anthropic pricing from https://docs.anthropic.com/en/docs/about-claude/models with 5s timeout; 2) When embedding backend is 'local', downloads ONNX embedding models (~80MB) via @huggingface/transformers from HuggingFace Hub; 3) When embedding backend is 'ollama', calls http://localhost:11434; 4) Starts local HTTP dashboard server on 127.0.0.1:<ephemeral-port> when /context-dashboard command runs."
+      },
+      "rationale": "Candidate is NOT_READY out of the box because dependencies are uninstalled. better-sqlite3 requires native compilation (node-gyp) or compatible prebuilts for Node 24 (ABI 137). sqlite-vec provides prebuilt binaries for linux-x64. web-tree-sitter requires WASM binaries. Additionally, local embeddings require installing @huggingface/transformers and downloading model weights (~80MB), or connecting to an external Ollama instance."
+    }
+  }
+}

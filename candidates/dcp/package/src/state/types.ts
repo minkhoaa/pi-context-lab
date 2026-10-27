@@ -1,0 +1,237 @@
+/**
+ * DCP session state types.
+ *
+ * Historical derivation and licensing basis are recorded in docs/provenance.md.
+ * All Maps/Sets are used in-memory; persistence serializes to plain objects.
+ */
+
+/**
+ * Compression permission shared by configuration, session override, and snapshots.
+ * `allow` exposes and runs compression, `ask` confirms per call, `deny` suppresses it.
+ */
+export type CompressPermission = "allow" | "ask" | "deny";
+
+export interface SessionState {
+  /** Current session identifier (set on session_start). */
+  sessionId: string | null;
+  /** Manual mode: false = auto, "active" = manual. */
+  manualMode: false | "active";
+  /** Effective compress permission for this session. */
+  compressPermission: CompressPermission | undefined;
+  /** Pruning state (tools + message compression). */
+  prune: Prune;
+  /** Nudge anchor tracking. */
+  nudges: Nudges;
+  /** Token savings statistics. */
+  stats: SessionStats;
+  /** Tool parameter cache for deduplication and purge-errors. */
+  toolParameters: Map<string, ToolParameterEntry>;
+  /** Ordered list of tool call IDs in current context. */
+  toolIdList: string[];
+  /** Message ID assignment state. */
+  messageIds: MessageIdState;
+  /** Timestamp of last compaction detected. */
+  lastCompaction: number;
+  /** User-turn ordinal rebuilt from the current raw messages. */
+  currentUserTurn: number;
+  /** Model context window size (from Pi's ctx.getContextUsage). */
+  modelContextWindow: number | undefined;
+  /** Active model identifier (e.g. "claude-sonnet-4-20250514"). */
+  modelId: string | undefined;
+  /** Active model provider (e.g. "anthropic"). */
+  modelProvider: string | undefined;
+  /** Compression timing tracking. */
+  compressionTiming: CompressionTimingState;
+  /** True if this session is running as a sub-agent child. */
+  isSubAgent: boolean;
+  /** Cached sub-agent results from completed child sessions, keyed by toolCallId. */
+  subAgentResultCache: Map<string, string>;
+}
+
+export interface Prune {
+  /** Tool call IDs marked for output pruning, mapped to estimated token count. */
+  tools: Map<string, number>;
+  /** Compression block state. */
+  messages: PruneMessagesState;
+}
+
+export interface PruneMessagesState {
+  /** Per-message compression metadata. */
+  byMessageIndex: Map<number, PrunedMessageEntry>;
+  /** All compression blocks by ID. */
+  blocksById: Map<number, CompressionBlock>;
+  /** Currently active block IDs. */
+  activeBlockIds: Set<number>;
+  /** Anchor message index -> active block ID. */
+  activeByAnchorIndex: Map<number, number>;
+  /** Next block ID to allocate. */
+  nextBlockId: number;
+  /** Next run ID to allocate. */
+  nextRunId: number;
+}
+
+export interface PrunedMessageEntry {
+  /** Estimated token count of the original message. */
+  tokenCount: number;
+  /** Block IDs that cover this message (may have multiple from nesting). */
+  blockIds: number[];
+  /** Block IDs that are currently active on this message. */
+  activeBlockIds: number[];
+}
+
+export interface CompressionBlock {
+  blockId: number;
+  runId: number;
+  active: boolean;
+  deactivatedByUser: boolean;
+  compressedTokens: number;
+  summaryTokens: number;
+  durationMs: number;
+  mode: "range" | "message" | undefined;
+  topic: string;
+  batchTopic: string | undefined;
+  startIndex: number;
+  endIndex: number;
+  anchorIndex: number;
+  compressToolCallId: string;
+  startKey: string;
+  endKey: string;
+  anchorKey: string;
+  consumedBlockIds: number[];
+  parentBlockIds: number[];
+  directMessageIndices: number[];
+  directToolIds: string[];
+  effectiveMessageIndices: number[];
+  effectiveToolIds: string[];
+  createdAt: number;
+  deactivatedAt: number | undefined;
+  deactivatedByBlockId: number | undefined;
+  summary: string;
+}
+
+export interface ToolParameterEntry {
+  tool: string;
+  parameters: unknown;
+  /** Unique normalized file paths from direct arguments and nested tool calls. */
+  filePaths: string[];
+  status: "pending" | "running" | "completed" | "error" | undefined;
+  error: string | undefined;
+  userTurn: number;
+  tokenCount: number | undefined;
+  /** Index of the assistant message containing this tool call. */
+  assistantIndex: number | undefined;
+  /** Index of the toolResult message for this tool call. */
+  resultIndex: number | undefined;
+}
+
+export interface Nudges {
+  /** Message keys where context limit nudges are anchored. */
+  contextLimitAnchors: Set<string>;
+  /** Message keys where turn nudges are anchored. */
+  turnAnchors: Set<string>;
+  /** Message keys where iteration nudges are anchored. */
+  iterationAnchors: Set<string>;
+}
+
+export interface SessionStats {
+  pruneTokenCounter: number;
+  totalPruneTokens: number;
+  toolsPruned: number;
+  messagesCompressed: number;
+}
+
+/** Version 1 durable representation of a compression block. */
+export interface DcpSnapshotBlockV1 {
+  blockId: number;
+  runId: number;
+  deactivatedByUser: boolean;
+  compressedTokens: number;
+  summaryTokens: number;
+  durationMs: number;
+  mode: "range" | "message";
+  topic: string;
+  batchTopic?: string;
+  compressToolCallId: string;
+  startKey: string;
+  endKey: string;
+  anchorKey: string;
+  consumedBlockIds: number[];
+  createdAt: number;
+  summary: string;
+}
+
+/** Versioned durable DCP state stored in Pi custom session entries. */
+export interface DcpSnapshotV1 {
+  version: 1;
+  ownerSessionId: string;
+  manualMode: false | "active";
+  compressPermission: "allow" | "deny";
+  stats: SessionStats;
+  lastCompaction: number;
+  pruneTools: Array<[string, number]>;
+  blocks: DcpSnapshotBlockV1[];
+  nextBlockId: number;
+  nextRunId: number;
+  messageIds: {
+    byRawId: Array<[string, string]>;
+    nextRefIndex: number;
+  };
+  nudges: {
+    contextLimitAnchors: string[];
+    turnAnchors: string[];
+    iterationAnchors: string[];
+  };
+}
+
+/**
+ * Version 2 durable state. Reuses the version-1 field and block shape and only
+ * widens the permission union to include `ask`; readers continue to accept v1.
+ */
+export interface DcpSnapshotV2 {
+  version: 2;
+  ownerSessionId: string;
+  manualMode: false | "active";
+  compressPermission: CompressPermission;
+  stats: SessionStats;
+  lastCompaction: number;
+  pruneTools: Array<[string, number]>;
+  blocks: DcpSnapshotBlockV1[];
+  nextBlockId: number;
+  nextRunId: number;
+  messageIds: {
+    byRawId: Array<[string, string]>;
+    nextRefIndex: number;
+  };
+  nudges: {
+    contextLimitAnchors: string[];
+    turnAnchors: string[];
+    iterationAnchors: string[];
+  };
+}
+
+export type DcpSnapshot = DcpSnapshotV1 | DcpSnapshotV2;
+
+export interface MessageIdState {
+  /** Content-derived key -> ref string (e.g. "user:1719100000000:0" -> "m0001"). */
+  byRawId: Map<string, string>;
+  /** Reverse lookup: ref string -> content-derived key. */
+  byRef: Map<string, string>;
+  /** Runtime index cache: rebuilt each pipeline pass. Maps message index -> ref. */
+  byIndex: Map<number, string>;
+  nextRefIndex: number;
+}
+
+export interface CompressionTimingState {
+  /** Start timestamps for in-flight compress calls. Keyed by toolCallId. */
+  startTimes: Map<string, number>;
+}
+
+/**
+ * Context usage snapshot from Pi's ctx.getContextUsage().
+ * tokens and percent can be null when usage data is unavailable.
+ */
+export interface ContextUsage {
+  tokens: number | null;
+  contextWindow: number;
+  percent: number | null;
+}

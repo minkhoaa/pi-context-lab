@@ -1,0 +1,57 @@
+{
+  "baseline": {
+    "id": "A",
+    "name": "baseline",
+    "label": "Pure Baseline",
+    "description": "Pi built-in tools only: read,bash,edit,write. No extensions, skills, or prompt overlays.",
+    "extension_path": null,
+    "agent_dir": "/home/khoa/pi-context-lab/agents/baseline",
+    "session_dir": "/home/khoa/pi-context-lab/sessions/baseline",
+    "tools": ["read", "bash", "edit", "write"],
+    "extra_flags": []
+  },
+  "sift": {
+    "id": "P1",
+    "name": "sift",
+    "label": "Sift",
+    "description": "Tool-output compression and content-aware filtering with local stash.",
+    "extension_path": "/home/khoa/pi-context-lab/candidates/sift/package/index.ts",
+    "agent_dir": "/home/khoa/pi-context-lab/agents/sift",
+    "session_dir": "/home/khoa/pi-context-lab/sessions/sift",
+    "tools": ["read", "bash", "edit", "write", "sift_retrieve"],
+    "extra_flags": ["-e", "/home/khoa/pi-context-lab/candidates/sift/package/index.ts"]
+  },
+  "context-prune": {
+    "id": "P2",
+    "name": "context-prune",
+    "label": "pi-context-prune",
+    "description": "Summarization and pruning of historical tool outputs with recoverable history.",
+    "extension_path": "/home/khoa/pi-context-lab/candidates/context-prune/package/dist/index.js",
+    "agent_dir": "/home/khoa/pi-context-lab/agents/context-prune",
+    "session_dir": "/home/khoa/pi-context-lab/sessions/context-prune",
+    "tools": ["read", "bash", "edit", "write"],
+    "extra_flags": ["-e", "/home/khoa/pi-context-lab/candidates/context-prune/package/dist/index.js"]
+  },
+  "dcp": {
+    "id": "P3",
+    "name": "dcp",
+    "label": "Pi DCP",
+    "description": "Dynamic pruning, deduplication, and stale context compression.",
+    "extension_path": "/home/khoa/pi-context-lab/candidates/dcp/package/src/index.ts",
+    "agent_dir": "/home/khoa/pi-context-lab/agents/dcp",
+    "session_dir": "/home/khoa/pi-context-lab/sessions/dcp",
+    "tools": ["read", "bash", "edit", "write"],
+    "extra_flags": ["-e", "/home/khoa/pi-context-lab/candidates/dcp/package/src/index.ts"]
+  },
+  "context-engine": {
+    "id": "P4",
+    "name": "context-engine",
+    "label": "Pi Context Engine",
+    "description": "Tree-sitter indexing, hybrid vector/BM25 retrieval, and cross-session code memory.",
+    "extension_path": "/home/khoa/pi-context-lab/candidates/context-engine/package/src/extension.ts",
+    "agent_dir": "/home/khoa/pi-context-lab/agents/context-engine",
+    "session_dir": "/home/khoa/pi-context-lab/sessions/context-engine",
+    "tools": ["read", "bash", "edit", "write"],
+    "extra_flags": ["-e", "/home/khoa/pi-context-lab/candidates/context-engine/package/src/extension.ts"]
+  }
+}

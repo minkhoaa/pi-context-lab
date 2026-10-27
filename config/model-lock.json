@@ -1,0 +1,12 @@
+{
+  "provider": "openai-codex",
+  "model": "gpt-6-luna",
+  "thinking": "max",
+  "pricing": {
+    "prompt_per_1m": 2.50,
+    "cache_read_per_1m": 1.25,
+    "cache_write_per_1m": 2.50,
+    "completion_per_1m": 10.00
+  },
+  "enforce_pin": true
+}

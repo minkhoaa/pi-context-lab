@@ -1,0 +1,409 @@
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { ContextUsage, SessionState } from "../state/types.ts";
+import type { DcpConfig } from "../config.ts";
+import { getActiveSummaryTokenUsage } from "../compress/blocks.ts";
+import { isContextOverLimits } from "../utils/context-limits.ts";
+import { formatMessageMarker, formatMessageRef, getMessageKey } from "../utils/message-ids.ts";
+import type { PriorityMap } from "./priority.ts";
+import { appendText, mapText } from "../utils/message-content.ts";
+import { stripHallucinationsFromString } from "./strip.ts";
+import { CONTEXT_LIMIT_NUDGE, TURN_NUDGE, ITERATION_NUDGE } from "../prompts/nudges.ts";
+import type { RuntimePrompts } from "../prompts/store.ts";
+
+/**
+ * Assign sequential message refs (m0001, m0002, ...) using content-derived stable keys.
+ * Refs are stored in state.messageIds.byRawId (persistent) and byIndex (runtime cache).
+ * A message always gets the same ref regardless of its position in the array.
+ *
+ * Counter logic: For messages sharing the same role:timestamp, a 0-based counter
+ * disambiguates them based on their order in the array. ToolResult messages use
+ * toolCallId (unique) and bypass the counter.
+ */
+export function assignMessageRefs(state: SessionState, messages: AgentMessage[]): void {
+  // Clear runtime index cache — rebuilt each pass
+  state.messageIds.byIndex.clear();
+
+  // Count occurrences of each role:timestamp prefix to assign counters
+  const prefixCounters = new Map<string, number>();
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+
+    let key: string;
+    if (msg.role === "toolResult") {
+      key = getMessageKey(msg, 0); // counter ignored for toolResult
+    } else {
+      const ts = (msg as unknown as { timestamp: number }).timestamp;
+      const prefix = `${msg.role}:${ts}`;
+      const counter = prefixCounters.get(prefix) ?? 0;
+      prefixCounters.set(prefix, counter + 1);
+      key = getMessageKey(msg, counter);
+    }
+
+    let ref = state.messageIds.byRawId.get(key);
+
+    if (!ref) {
+      ref = formatMessageRef(state.messageIds.nextRefIndex);
+      state.messageIds.byRawId.set(key, ref);
+      state.messageIds.byRef.set(ref, key);
+      state.messageIds.nextRefIndex++;
+    }
+
+    state.messageIds.byIndex.set(i, ref);
+  }
+}
+
+/**
+ * Inject compact markers (`@m1@`, `@m1:3@`) into message text content.
+ * Returns a new array. Strips existing DCP metadata before injecting fresh markers.
+ * Stored refs stay canonical (`m0001`); only the model-facing marker is compact.
+ *
+ * Handles both array content and plain-string content (E9: UserMessage.content
+ * can be a plain string — normalize to array form before injecting).
+ */
+export function injectMessageIds(
+  state: SessionState,
+  messages: AgentMessage[],
+  priorityMap?: PriorityMap,
+): AgentMessage[] {
+  return messages.map((msg, i) => {
+    const ref = state.messageIds.byIndex.get(i);
+    if (!ref) return msg;
+
+    if (msg.role !== "user" && msg.role !== "assistant") return msg;
+
+    const priorityEntry = priorityMap?.get(i);
+    const marker = formatMessageMarker(ref, priorityEntry?.priority);
+
+    // Strip any existing (stale/partial) DCP metadata before injecting fresh markers.
+    // This replaces marker-based idempotency — always inject clean.
+    // Note: not idempotent in isolation (repeated calls add trailing \n\n).
+    // Safe because this runs exactly once per context pass on fresh stored messages.
+    const cleaned =
+      msg.role === "user" && typeof msg.content === "string"
+        ? { ...msg, content: stripHallucinationsFromString(msg.content) }
+        : mapText(msg, stripHallucinationsFromString);
+    return appendText(cleaned, `\n\n${marker}`);
+  });
+}
+
+/**
+ * Inject compress nudges using persistent anchored positions.
+ * Two stages:
+ *   1. Decision: determine nudge type, add anchor if frequency allows
+ *   2. Application: inject nudge text at all anchored positions
+ *
+ * Requires assignMessageRefs to have been called for this pipeline pass.
+ */
+export function injectCompressNudges(
+  state: SessionState,
+  config: DcpConfig,
+  messages: AgentMessage[],
+  contextUsage: ContextUsage | undefined,
+  runtimePrompts?: RuntimePrompts,
+): AgentMessage[] {
+  if (!contextUsage) return messages;
+  if (messages.length === 0) return messages;
+  if (state.manualMode) return messages;
+  if (state.compressPermission === "deny") return messages;
+
+  // --- Decision Stage ---
+  const { overMaxLimit: overMax, overMinLimit: overMin } = isContextOverLimits(
+    config,
+    state,
+    contextUsage,
+  );
+
+  // Summary buffer adjustment (from Phase 3)
+  let effectiveOverMax = overMax;
+  if (effectiveOverMax && config.compress.summaryBuffer && contextUsage.tokens != null) {
+    const summaryTokens = getActiveSummaryTokenUsage(state);
+    if (summaryTokens > 0) {
+      const effectiveTokens = contextUsage.tokens - summaryTokens;
+      const adjusted = isContextOverLimits(config, state, {
+        ...contextUsage,
+        tokens: effectiveTokens,
+        percent:
+          contextUsage.contextWindow > 0
+            ? (effectiveTokens / contextUsage.contextWindow) * 100
+            : contextUsage.percent,
+      });
+      effectiveOverMax = adjusted.overMaxLimit;
+    }
+  }
+
+  if (!overMin) return messages;
+
+  reconcileLegacyTurnAnchors(state, messages);
+
+  // Anchor at the last injectable (user/assistant) message, not necessarily the absolute last.
+  // toolResult and other roles cannot receive nudge text.
+  let targetIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user" || messages[i].role === "assistant") {
+      targetIndex = i;
+      break;
+    }
+  }
+  if (targetIndex === -1) return messages; // no injectable message
+
+  // Determine which nudge to add
+  let nudgeType: "contextLimit" | "turn" | "iteration" | undefined;
+  if (effectiveOverMax) {
+    nudgeType = "contextLimit";
+  } else {
+    const targetMsg = messages[targetIndex];
+    if (targetMsg.role === "user") {
+      nudgeType = "turn";
+    } else {
+      let messagesSinceUser = 0;
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === "user") break;
+        if (messages[i].role === "assistant") messagesSinceUser++;
+      }
+      if (messagesSinceUser >= config.compress.iterationNudgeThreshold) {
+        nudgeType = "iteration";
+      }
+    }
+  }
+
+  if (nudgeType) {
+    const targetKey = getKeyForIndex(state, targetIndex);
+
+    if (targetKey) {
+      // Context limit nudges always anchor (ignore frequency)
+      if (nudgeType === "contextLimit") {
+        state.nudges.contextLimitAnchors.add(targetKey);
+      } else if (nudgeType === "turn") {
+        addTurnPairIfAllowed(state, config, messages, targetIndex);
+      } else {
+        addAnchorIfAllowed(
+          state.nudges.iterationAnchors,
+          targetKey,
+          targetIndex,
+          state,
+          messages.length,
+          config.compress.nudgeFrequency,
+        );
+      }
+    }
+  }
+
+  // --- Application Stage ---
+  return applyAnchoredNudges(state, config, messages, runtimePrompts);
+}
+
+/**
+ * Get the stable message key for a message at a given index.
+ * Requires assignMessageRefs to have been called on this pass.
+ * Returns undefined if the index has no assigned key.
+ */
+function getKeyForIndex(state: SessionState, index: number): string | undefined {
+  const ref = state.messageIds.byIndex.get(index);
+  if (!ref) return undefined;
+  return state.messageIds.byRef.get(ref);
+}
+
+/**
+ * Build a reverse map from message key to array index for the current messages.
+ * Used by anchor distance calculations.
+ */
+function buildKeyToIndexMap(state: SessionState, messageCount: number): Map<string, number> {
+  const map = new Map<string, number>();
+  for (let i = 0; i < messageCount; i++) {
+    if (state.prune.messages.byMessageIndex.get(i)?.activeBlockIds.length) continue;
+    const key = getKeyForIndex(state, i);
+    if (key) map.set(key, i);
+  }
+  return map;
+}
+
+/**
+ * Add anchor only if the nearest existing anchor in the set is >= frequency messages away.
+ */
+function addAnchorIfAllowed(
+  anchorSet: Set<string>,
+  targetKey: string,
+  targetIndex: number,
+  state: SessionState,
+  messageCount: number,
+  frequency: number,
+): void {
+  if (anchorSet.has(targetKey)) return;
+
+  // Build key → index lookup for current messages
+  const keyToIndex = buildKeyToIndexMap(state, messageCount);
+
+  // Find the closest existing anchor by message distance
+  let closestDistance = Number.POSITIVE_INFINITY;
+  for (const existingKey of anchorSet) {
+    const existingIndex = keyToIndex.get(existingKey);
+    if (existingIndex !== undefined) {
+      closestDistance = Math.min(closestDistance, Math.abs(targetIndex - existingIndex));
+    }
+    // Anchors not in current messages (stale) are ignored for distance calculation
+  }
+
+  if (closestDistance >= frequency) {
+    anchorSet.add(targetKey);
+  }
+}
+
+/**
+ * Version-1 snapshots written before paired turn anchors stored only the user
+ * half. Recover the matching assistant key from the current message sequence so
+ * soft nudges remain visible without changing the persisted snapshot version.
+ */
+function reconcileLegacyTurnAnchors(state: SessionState, messages: AgentMessage[]): void {
+  let precedingAssistantKey: string | undefined;
+
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    if (message.role === "assistant") {
+      precedingAssistantKey = getKeyForIndex(state, i);
+      continue;
+    }
+    if (message.role !== "user") continue;
+
+    const userKey = getKeyForIndex(state, i);
+    if (userKey && precedingAssistantKey && state.nudges.turnAnchors.has(userKey)) {
+      state.nudges.turnAnchors.add(precedingAssistantKey);
+    }
+  }
+}
+
+/**
+ * Store an eligible user turn together with the nearest earlier assistant.
+ * Frequency is measured only against existing user-role turn anchors so the
+ * assistant half of a pair never suppresses a later pair.
+ */
+function addTurnPairIfAllowed(
+  state: SessionState,
+  config: DcpConfig,
+  messages: AgentMessage[],
+  targetIndex: number,
+): void {
+  const userKey = getKeyForIndex(state, targetIndex);
+  if (!userKey || state.nudges.turnAnchors.has(userKey)) return;
+
+  let assistantIndex = -1;
+  for (let i = targetIndex - 1; i >= 0; i--) {
+    if (messages[i].role === "assistant") {
+      assistantIndex = i;
+      break;
+    }
+  }
+  if (assistantIndex === -1) return;
+
+  const assistantKey = getKeyForIndex(state, assistantIndex);
+  if (!assistantKey) return;
+
+  const keyToIndex = buildKeyToIndexMap(state, messages.length);
+  let closestDistance = Number.POSITIVE_INFINITY;
+  for (const existingKey of state.nudges.turnAnchors) {
+    const existingIndex = keyToIndex.get(existingKey);
+    if (existingIndex === undefined) continue;
+    if (messages[existingIndex]?.role !== "user") continue;
+    closestDistance = Math.min(closestDistance, Math.abs(targetIndex - existingIndex));
+  }
+
+  if (closestDistance < config.compress.nudgeFrequency) return;
+
+  state.nudges.turnAnchors.add(assistantKey);
+  state.nudges.turnAnchors.add(userKey);
+}
+
+/**
+ * Inject nudge text at all anchored message positions.
+ */
+function applyAnchoredNudges(
+  state: SessionState,
+  config: DcpConfig,
+  messages: AgentMessage[],
+  runtimePrompts?: RuntimePrompts,
+): AgentMessage[] {
+  const result = [...messages];
+  let changed = false;
+
+  for (let i = 0; i < result.length; i++) {
+    const key = getKeyForIndex(state, i);
+    if (!key) continue;
+
+    const msg = result[i];
+    if (msg.role !== "user" && msg.role !== "assistant") continue;
+
+    let nudgeText: string | undefined;
+
+    if (state.nudges.contextLimitAnchors.has(key)) {
+      nudgeText = runtimePrompts?.contextLimitNudge ?? CONTEXT_LIMIT_NUDGE;
+    } else if (state.nudges.turnAnchors.has(key)) {
+      const force = config.compress.nudgeForce;
+      if (force === "strong" && msg.role !== "user") continue;
+      if (force === "soft" && msg.role !== "assistant") continue;
+      nudgeText = runtimePrompts?.turnNudge ?? TURN_NUDGE;
+    } else if (state.nudges.iterationAnchors.has(key)) {
+      nudgeText = runtimePrompts?.iterationNudge ?? ITERATION_NUDGE;
+    }
+
+    if (!nudgeText) continue;
+
+    // Skip if already has nudge text
+    if (hasExistingNudge(msg)) continue;
+
+    result[i] = appendNudgeText(msg, nudgeText);
+    changed = true;
+  }
+
+  return changed ? result : messages;
+}
+
+/**
+ * Append nudge text to a message. Messages with a text part reuse appendText;
+ * assistant messages containing only tool calls receive a synthetic text part
+ * inserted before the first tool call.
+ */
+function appendNudgeText(msg: AgentMessage, text: string): AgentMessage {
+  if (!("content" in msg)) return msg;
+  if (hasTextPart(msg)) return appendText(msg, `\n\n${text}`);
+  if (!Array.isArray(msg.content)) return msg;
+
+  const content = msg.content as unknown[];
+  const toolCallIndex = content.findIndex(
+    (part) =>
+      typeof part === "object" &&
+      part !== null &&
+      (part as unknown as Record<string, unknown>).type === "toolCall",
+  );
+  if (toolCallIndex === -1) return msg;
+
+  const newContent = [...content];
+  newContent.splice(toolCallIndex, 0, { type: "text", text });
+  return { ...msg, content: newContent } as AgentMessage;
+}
+
+function hasTextPart(msg: AgentMessage): boolean {
+  if (!("content" in msg)) return false;
+  if (typeof msg.content === "string") return true;
+  if (!Array.isArray(msg.content)) return false;
+  return (msg.content as unknown[]).some(
+    (part) =>
+      typeof part === "object" &&
+      part !== null &&
+      (part as unknown as Record<string, unknown>).type === "text",
+  );
+}
+
+function hasExistingNudge(msg: AgentMessage): boolean {
+  if (!("content" in msg)) return false;
+  if (typeof msg.content === "string") return msg.content.includes("<dcp-system-reminder>");
+  if (!Array.isArray(msg.content)) return false;
+  return msg.content.some((p) => {
+    if (typeof p !== "object" || p === null) return false;
+    const part = p as unknown as Record<string, unknown>;
+    return (
+      part.type === "text" &&
+      typeof part.text === "string" &&
+      (part.text as string).includes("<dcp-system-reminder>")
+    );
+  });
+}

@@ -1,0 +1,2 @@
+{"status": "SAMPLE_TRACE", "description": "Reference trace sample demonstrating multi-megabyte diagnostic format when errors trigger."}
+{"trace_id": "sample-0001", "stage": "buffer_push", "event": "sample_event_data"}

@@ -1,0 +1,99 @@
+import { clearCompressionBlocks, createCompressionBlockState } from "../compress/blocks.ts";
+import type {
+  CompressionTimingState,
+  MessageIdState,
+  Nudges,
+  Prune,
+  SessionState,
+  SessionStats,
+} from "./types.ts";
+
+export function createSessionState(): SessionState {
+  return {
+    sessionId: null,
+    manualMode: false,
+    compressPermission: undefined,
+    prune: createPrune(),
+    nudges: createNudges(),
+    stats: createStats(),
+    toolParameters: new Map(),
+    toolIdList: [],
+    messageIds: createMessageIdState(),
+    lastCompaction: 0,
+    currentUserTurn: 0,
+    modelContextWindow: undefined,
+    modelId: undefined,
+    modelProvider: undefined,
+    compressionTiming: createCompressionTiming(),
+    isSubAgent: false,
+    subAgentResultCache: new Map(),
+  };
+}
+
+export function resetSessionState(state: SessionState): void {
+  state.sessionId = null;
+  state.manualMode = false;
+  state.compressPermission = undefined;
+  state.prune.tools.clear();
+  clearCompressionBlocks(state, "session");
+  state.nudges.contextLimitAnchors.clear();
+  state.nudges.turnAnchors.clear();
+  state.nudges.iterationAnchors.clear();
+  state.stats.pruneTokenCounter = 0;
+  state.stats.totalPruneTokens = 0;
+  state.stats.toolsPruned = 0;
+  state.stats.messagesCompressed = 0;
+  state.toolParameters.clear();
+  state.toolIdList = [];
+  state.messageIds.byRawId.clear();
+  state.messageIds.byRef.clear();
+  state.messageIds.byIndex.clear();
+  state.messageIds.nextRefIndex = 1;
+  state.lastCompaction = 0;
+  state.currentUserTurn = 0;
+  state.modelContextWindow = undefined;
+  state.modelId = undefined;
+  state.modelProvider = undefined;
+  state.compressionTiming.startTimes.clear();
+  state.isSubAgent = false;
+  state.subAgentResultCache.clear();
+}
+
+function createCompressionTiming(): CompressionTimingState {
+  return {
+    startTimes: new Map(),
+  };
+}
+
+function createPrune(): Prune {
+  return {
+    tools: new Map(),
+    messages: createCompressionBlockState(),
+  };
+}
+
+function createNudges(): Nudges {
+  return {
+    contextLimitAnchors: new Set(),
+    turnAnchors: new Set(),
+    iterationAnchors: new Set(),
+  };
+}
+
+function createStats(): SessionStats {
+  return {
+    pruneTokenCounter: 0,
+    totalPruneTokens: 0,
+    toolsPruned: 0,
+    messagesCompressed: 0,
+  };
+}
+
+function createMessageIdState(): MessageIdState {
+  return {
+    byRawId: new Map(),
+    byRef: new Map(),
+    byIndex: new Map(),
+    nextRefIndex: 1,
+  };
+}
