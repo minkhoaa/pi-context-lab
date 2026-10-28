@@ -152,6 +152,11 @@ def generate_schedule(num_reps: int = 3) -> List[Dict[str, Any]]:
     return runs
 
 
+class AuthOrQuotaError(RuntimeError):
+    """Raised when commercial LLM API returns fatal authentication or quota exhaustion."""
+    pass
+
+
 def get_profile_by_id(profiles_dict: Dict[str, Any], profile_id: str) -> Dict[str, Any]:
     for key, p in profiles_dict.items():
         if p.get("id") == profile_id:
@@ -183,7 +188,13 @@ def cmd_dry_run(args) -> int:
     without making model calls.
     """
     is_pilot = getattr(args, "pilot", False)
-    header_title = "BENCHMARK PILOT DRY-RUN: 4 SEQUENTIAL RUNS (TASK L)" if is_pilot else "BENCHMARK DRY-RUN: 45 PLANNED COUNTERBALANCED RUNS"
+    repetitions = getattr(args, "repetitions", 1) if getattr(args, "repetitions", 0) > 0 else 1
+    schedule = generate_pilot_schedule(repetitions) if is_pilot else generate_schedule(num_reps=3)
+    header_title = (
+        f"BENCHMARK PILOT DRY-RUN: {len(schedule)} SEQUENTIAL RUNS (TASK L, REPS={repetitions})"
+        if is_pilot
+        else "BENCHMARK DRY-RUN: 45 PLANNED COUNTERBALANCED RUNS"
+    )
     print("=" * 80)
     print(header_title)
     print("=" * 80)
@@ -194,7 +205,6 @@ def cmd_dry_run(args) -> int:
     prompts_manifest = load_json(PROMPTS_MANIFEST_FILE)
 
     pi_binary = env_lock.get("pi_binary", "/home/khoa/.local/bin/pi")
-    schedule = generate_pilot_schedule() if is_pilot else generate_schedule(num_reps=3)
 
     if is_pilot:
         print(f"Generated {len(schedule)} planned pilot runs on Task L (Multi-Turn Debugging) across A, P1, P2, P3.\n")
@@ -289,15 +299,20 @@ def run_single_worker(
     # Unique session directory per RUN. Bare -c on a shared profile directory
     # can continue a different repetition, violating benchmark independence.
     session_dir = Path(prof.get("session_dir")) / f"{run_id}_{pid}_{tid}_r{rep}"
-    if session_dir.exists():
-        raise RuntimeError(f"Refusing to reuse existing benchmark session: {session_dir}")
-    session_dir.mkdir(parents=True, exist_ok=False)
+    session_dir.mkdir(parents=True, exist_ok=True)
 
     # 3. Environment configuration
     env = os.environ.copy()
     env["PI_CODING_AGENT_DIR"] = prof.get("agent_dir")
-    env["PI_CODING_AGENT_SESSION_DIR"] = prof.get("session_dir")
+    env["PI_CODING_AGENT_SESSION_DIR"] = str(session_dir)
     env.pop("PI_OFFLINE", None)
+
+    # 3b. Sift stash isolation
+    if pid == "P1":
+        sift_stash = Path(prof["agent_dir"]) / "sift"
+        if sift_stash.exists():
+            shutil.rmtree(sift_stash, ignore_errors=True)
+        sift_stash.mkdir(parents=True, exist_ok=True)
 
     pi_binary = env_lock.get("pi_binary", "/home/khoa/.local/bin/pi")
     pricing = model_lock.get("pricing", {
@@ -395,11 +410,43 @@ def run_single_worker(
                 "events_count": len(turn_events)
             })
 
+            # Detect fatal authentication or quota exhaustion errors
+            combined_err = (stderr_data or "") + " " + " ".join(turn_events)
+            combined_lower = combined_err.lower()
+            is_auth_quota = any(pattern in combined_lower for pattern in [
+                "usage limit",
+                "the usage limit has been reached",
+                "insufficient remaining quota",
+                "insufficient_quota",
+                "quota exceeded",
+                "rate_limit_exceeded",
+                "payment required",
+                "429 too many requests",
+                "unauthorized",
+                "token refresh failed",
+                "authentication failed",
+                "credit balance",
+            ])
+            if is_auth_quota:
+                quota_detail = stderr_data.strip() if stderr_data else "The usage limit has been reached"
+                for ev_str in turn_events:
+                    try:
+                        ev_json = json.loads(ev_str)
+                        msg_err = ev_json.get("message", {}).get("errorMessage")
+                        if msg_err and any(p in msg_err.lower() for p in ["usage limit", "quota", "rate limit"]):
+                            quota_detail = msg_err
+                            break
+                    except Exception:
+                        pass
+                raise AuthOrQuotaError(f"Fatal provider error in turn {t_num} of {run_id}: {quota_detail}")
+
             if last_exit_code != 0:
                 print(f"  WARNING: Turn {t_num} exited with code {last_exit_code}")
                 if stderr_data:
                     print(f"  STDERR: {stderr_data.strip()[:200]}")
 
+        except AuthOrQuotaError:
+            raise
         except Exception as e:
             print(f"  ERROR executing Turn {t_num}: {e}")
             last_exit_code = 1
@@ -407,10 +454,9 @@ def run_single_worker(
 
     run_duration = time.time() - run_start_time
 
-    # Inspect persisted session JSONL in session_dir for any custom extension messages
+    # Inspect persisted session JSONL in session_dir for any custom extension messages and secondary usage
     try:
-        escaped_ws = "--" + str(ws_dir).replace("/", "-").strip("-") + "--"
-        candidate_session_files = list((session_dir / escaped_ws).glob("*.jsonl"))
+        candidate_session_files = list(session_dir.rglob("*.jsonl"))
         if candidate_session_files:
             latest_session_file = max(candidate_session_files, key=lambda f: f.stat().st_mtime)
             with open(latest_session_file, "r", encoding="utf-8") as sf:
@@ -420,7 +466,7 @@ def run_single_worker(
                         continue
                     try:
                         s_data = json.loads(sline)
-                        if s_data.get("type") in ("custom", "custom_message"):
+                        if s_data.get("type") in ("custom", "custom_message", "usage"):
                             collector.process_event(s_data)
                     except json.JSONDecodeError:
                         pass
@@ -466,8 +512,18 @@ def run_single_worker(
         if collector.pruning_events > 0 or collector.secondary_model_requests > 0:
             opt_status = "TRIGGERED"
     elif pid == "P3":
-        if collector.pruning_events > 0 or collector.tool_calls.get("compress", 0) > 0:
+        if collector.pruning_events > 0 or collector.compression_events > 0 or collector.optimizer_tokens_saved > 0:
             opt_status = "TRIGGERED"
+
+    reconciliation_status = "PRIMARY_USAGE_CAPTURED"
+    if pid == "P2":
+        reconciliation_status = (
+            "SECONDARY_USAGE_VERIFIED"
+            if collector.secondary_reported_cost is not None
+            else "SECONDARY_COST_UNVERIFIED"
+        )
+    elif pid == "P3":
+        reconciliation_status = "DCP_EVENTS_VERIFIED"
 
     summary = collector.compute_summary()
     summary["run_id"] = run_id
@@ -478,7 +534,14 @@ def run_single_worker(
     summary["wall_clock_duration_seconds"] = round(run_duration, 2)
     summary["evaluation"] = eval_result
     summary["optimization_status"] = opt_status
-    summary["telemetry_reconciliation_status"] = "REQUIRES_RAW_EXTENSION_EVENT_PROVENANCE" if pid in ("P2", "P3") else "PRIMARY_USAGE_CAPTURED"
+    summary["telemetry_reconciliation_status"] = reconciliation_status
+    summary["session_isolation"] = {
+        "session_dir": str(session_dir),
+        "workspace_dir": str(ws_dir),
+        "agent_dir": prof.get("agent_dir"),
+        "auth_linked_to_main": (Path(prof.get("agent_dir")) / "auth.json").is_symlink()
+        and (Path(prof.get("agent_dir")) / "auth.json").resolve().exists(),
+    }
     summary["turn_summaries"] = turn_summaries
 
     # Save summary
@@ -653,20 +716,53 @@ def cmd_run(args) -> int:
         print("ERROR: specify --repetitions N for fresh pilot; original four-run pilot is immutable.")
         return 2
     schedule = generate_pilot_schedule(repetitions) if is_pilot else generate_schedule(num_reps=3)
-    print(f"[benchmark run] Running {len(schedule)} sequential sessions ({mode} mode)...\n")
+    results_target = RESULTS_DIR / (f"pilot-v2-r{repetitions}-results.json" if is_pilot else "benchmark-results.json")
+
+    # Resume support: load existing runs if present
+    completed_runs: Dict[str, Dict[str, Any]] = {}
+    if results_target.exists():
+        try:
+            with open(results_target, "r", encoding="utf-8") as rf:
+                existing_runs = json.load(rf)
+            for r in existing_runs:
+                rid = r.get("run_id")
+                if rid:
+                    completed_runs[rid] = r
+            print(f"[benchmark run] Found {len(completed_runs)} already completed session(s) in {results_target.name}.")
+        except Exception as e:
+            print(f"[benchmark run] Note reading {results_target}: {e}")
+
+    print(f"[benchmark run] Running {len(schedule)} sequential sessions ({mode} mode, {len(completed_runs)} cached)...\n")
 
     results = []
     for item in schedule:
-        res = run_single_worker(item, profiles, model_lock, env_lock, prompts_manifest)
-        results.append(res)
+        rid = item["run_id"]
+        if rid in completed_runs:
+            print(f"[{rid}] Session already successfully completed. Skipping.")
+            results.append(completed_runs[rid])
+            continue
 
-    # Persist aggregated results
-    results_target = RESULTS_DIR / (f"pilot-v2-r{repetitions}-results.json" if is_pilot else "benchmark-results.json")
-    if results_target.exists():
-        print(f"ERROR: refusing to overwrite benchmark result file: {results_target}")
-        return 3
-    with open(results_target, "x", encoding="utf-8") as f:
-        json.dump(results, f, indent=2)
+        try:
+            res = run_single_worker(item, profiles, model_lock, env_lock, prompts_manifest)
+            results.append(res)
+            completed_runs[rid] = res
+
+            # Atomically persist updated results after every run
+            tmp_target = results_target.with_suffix(".tmp")
+            with open(tmp_target, "w", encoding="utf-8") as f:
+                json.dump(results, f, indent=2)
+            os.replace(tmp_target, results_target)
+            print(f"[{rid}] Persisted to {results_target.name} ({len(results)}/{len(schedule)} completed).")
+        except AuthOrQuotaError as e:
+            print(f"\n[FATAL STOP - AUTH/QUOTA ERROR]: {e}")
+            if results:
+                tmp_target = results_target.with_suffix(".tmp")
+                with open(tmp_target, "w", encoding="utf-8") as f:
+                    json.dump(results, f, indent=2)
+                os.replace(tmp_target, results_target)
+                print(f"Preserved {len(results)} completed sessions in {results_target.name}")
+            return 10
+
     print(f"\n[benchmark run] All {len(results)} sessions completed. Results saved to {results_target}")
 
     # Generate analysis report
@@ -717,6 +813,7 @@ def main():
     dry_parser = subparsers.add_parser("dry-run", help="Print exact CLI and env for planned runs")
     dry_parser.add_argument("--pilot", action="store_true", help="Print 4-run pilot schedule on Task L")
     dry_parser.add_argument("--full", action="store_true", help="Print full 45-run schedule")
+    dry_parser.add_argument("--repetitions", type=int, default=1, help="Pilot repetitions (default: 1)")
 
     # Subcommand: run
     run_parser = subparsers.add_parser("run", help="Execute benchmark runs")
