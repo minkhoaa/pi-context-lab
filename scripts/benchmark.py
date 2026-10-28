@@ -718,8 +718,12 @@ def cmd_run(args) -> int:
     schedule = generate_pilot_schedule(repetitions) if is_pilot else generate_schedule(num_reps=3)
     results_target = RESULTS_DIR / (f"pilot-v2-r{repetitions}-results.json" if is_pilot else "benchmark-results.json")
 
+    retry_until_passed = getattr(args, "retry_until_passed", False)
+    retry_delay = getattr(args, "retry_delay", 60)
+    max_retries = getattr(args, "max_retries", 10)
+
     # Resume support: load existing runs if present
-    completed_runs: Dict[str, Dict[str, Any]] = {}
+    runs_by_id: Dict[str, Dict[str, Any]] = {}
     if results_target.exists():
         try:
             with open(results_target, "r", encoding="utf-8") as rf:
@@ -727,43 +731,69 @@ def cmd_run(args) -> int:
             for r in existing_runs:
                 rid = r.get("run_id")
                 if rid:
-                    completed_runs[rid] = r
-            print(f"[benchmark run] Found {len(completed_runs)} already completed session(s) in {results_target.name}.")
+                    runs_by_id[rid] = r
+            passed_count = sum(1 for r in runs_by_id.values() if r.get("evaluation", {}).get("passed") is True)
+            print(f"[benchmark run] Found {len(runs_by_id)} session(s) ({passed_count} passed) in {results_target.name}.")
         except Exception as e:
             print(f"[benchmark run] Note reading {results_target}: {e}")
 
-    print(f"[benchmark run] Running {len(schedule)} sequential sessions ({mode} mode, {len(completed_runs)} cached)...\n")
+    attempts = 0
+    passed_total = sum(1 for r in runs_by_id.values() if r.get("evaluation", {}).get("passed") is True)
+    while passed_total < len(schedule):
+        attempts += 1
+        runs_in_this_pass = 0
+        quota_blocked = False
 
-    results = []
-    for item in schedule:
-        rid = item["run_id"]
-        if rid in completed_runs:
-            print(f"[{rid}] Session already successfully completed. Skipping.")
-            results.append(completed_runs[rid])
-            continue
+        for item in schedule:
+            rid = item["run_id"]
+            if runs_by_id.get(rid, {}).get("evaluation", {}).get("passed") is True:
+                continue
 
-        try:
-            res = run_single_worker(item, profiles, model_lock, env_lock, prompts_manifest)
-            results.append(res)
-            completed_runs[rid] = res
+            runs_in_this_pass += 1
+            try:
+                res = run_single_worker(item, profiles, model_lock, env_lock, prompts_manifest)
+                runs_by_id[rid] = res
+                if res.get("evaluation", {}).get("passed") is True:
+                    print(f"[{rid}] Session completed and PASSED.")
+                else:
+                    print(f"[{rid}] Session completed but FAILED independent evaluation (Score: {res.get('evaluation', {}).get('score')}).")
 
-            # Atomically persist updated results after every run
-            tmp_target = results_target.with_suffix(".tmp")
-            with open(tmp_target, "w", encoding="utf-8") as f:
-                json.dump(results, f, indent=2)
-            os.replace(tmp_target, results_target)
-            print(f"[{rid}] Persisted to {results_target.name} ({len(results)}/{len(schedule)} completed).")
-        except AuthOrQuotaError as e:
-            print(f"\n[FATAL STOP - AUTH/QUOTA ERROR]: {e}")
-            if results:
+                # Atomically persist updated results after every run
+                accumulated = [runs_by_id[s["run_id"]] for s in schedule if s["run_id"] in runs_by_id]
                 tmp_target = results_target.with_suffix(".tmp")
                 with open(tmp_target, "w", encoding="utf-8") as f:
-                    json.dump(results, f, indent=2)
+                    json.dump(accumulated, f, indent=2)
                 os.replace(tmp_target, results_target)
-                print(f"Preserved {len(results)} completed sessions in {results_target.name}")
-            return 10
+                passed_total = sum(1 for r in runs_by_id.values() if r.get("evaluation", {}).get("passed") is True)
+                print(f"[{rid}] Persisted to {results_target.name} ({passed_total}/{len(schedule)} passed).")
 
-    print(f"\n[benchmark run] All {len(results)} sessions completed. Results saved to {results_target}")
+            except AuthOrQuotaError as e:
+                quota_blocked = True
+                print(f"\n[FATAL STOP - AUTH/QUOTA ERROR]: {e}")
+                accumulated = [runs_by_id[s["run_id"]] for s in schedule if s["run_id"] in runs_by_id]
+                if accumulated:
+                    tmp_target = results_target.with_suffix(".tmp")
+                    with open(tmp_target, "w", encoding="utf-8") as f:
+                        json.dump(accumulated, f, indent=2)
+                    os.replace(tmp_target, results_target)
+                    print(f"Preserved {len(accumulated)} sessions in {results_target.name}")
+
+                if not retry_until_passed or attempts >= max_retries:
+                    passed_count = sum(1 for r in runs_by_id.values() if r.get("evaluation", {}).get("passed") is True)
+                    print(f"Stopping execution. {passed_count}/{len(schedule)} sessions passed.")
+                    return 10
+
+                print(f"[RETRY WAIT] Quota limit encountered: waiting {retry_delay}s before retry (attempt {attempts}/{max_retries})...")
+                time.sleep(retry_delay)
+                break
+
+        passed_total = sum(1 for r in runs_by_id.values() if r.get("evaluation", {}).get("passed") is True)
+        if not retry_until_passed or (quota_blocked and attempts >= max_retries):
+            break
+
+    results = [runs_by_id[s["run_id"]] for s in schedule if s["run_id"] in runs_by_id]
+    passed_count = sum(1 for r in results if r.get("evaluation", {}).get("passed") is True)
+    print(f"\n[benchmark run] {passed_count}/{len(schedule)} sessions passed ({len(results)} recorded). Results saved to {results_target}")
 
     # Generate analysis report
     if is_pilot:
@@ -826,6 +856,9 @@ def main():
         action="store_true",
         help="Explicitly authorize monetary spend for commercial model API calls",
     )
+    run_parser.add_argument("--retry-until-passed", action="store_true", help="Retry incomplete/failed sessions until all sessions pass")
+    run_parser.add_argument("--retry-delay", type=int, default=60, help="Delay in seconds between retry attempts when blocked by quota (default: 60)")
+    run_parser.add_argument("--max-retries", type=int, default=10, help="Maximum retry attempts when --retry-until-passed is enabled")
 
     # Subcommand: report
     subparsers.add_parser("report", help="Generate summary reports from results")
