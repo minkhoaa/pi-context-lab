@@ -152,6 +152,11 @@ def generate_schedule(num_reps: int = 3) -> List[Dict[str, Any]]:
     return runs
 
 
+class AuthOrQuotaError(RuntimeError):
+    """Raised when commercial LLM API returns fatal authentication or quota exhaustion."""
+    pass
+
+
 def get_profile_by_id(profiles_dict: Dict[str, Any], profile_id: str) -> Dict[str, Any]:
     for key, p in profiles_dict.items():
         if p.get("id") == profile_id:
@@ -159,7 +164,7 @@ def get_profile_by_id(profiles_dict: Dict[str, Any], profile_id: str) -> Dict[st
     raise ValueError(f"Unknown profile ID: {profile_id}")
 
 
-def generate_pilot_schedule() -> List[Dict[str, Any]]:
+def generate_pilot_schedule(repetitions: int = 1) -> List[Dict[str, Any]]:
     """
     Generate the 4 planned pilot sessions strictly on Task L:
     1. A: Baseline
@@ -168,12 +173,12 @@ def generate_pilot_schedule() -> List[Dict[str, Any]]:
     4. P3: DCP
     Sequential execution only. Task L multi-turn (4 turns).
     """
-    return [
-        {"run_id": "pilot-01", "profile_id": "A", "task_id": "task-l", "rep": 1},
-        {"run_id": "pilot-02", "profile_id": "P1", "task_id": "task-l", "rep": 1},
-        {"run_id": "pilot-03", "profile_id": "P2", "task_id": "task-l", "rep": 1},
-        {"run_id": "pilot-04", "profile_id": "P3", "task_id": "task-l", "rep": 1},
-    ]
+    profiles = ("A", "P1", "P2", "P3")
+    return [{"run_id": f"pilot-v2-r{rep}-{idx+1:02d}",
+             "profile_id": profiles[(idx+rep-1) % len(profiles)],
+             "task_id":"task-l", "rep":rep}
+            for rep in range(1, repetitions+1)
+            for idx in range(len(profiles))]
 
 
 def cmd_dry_run(args) -> int:
@@ -183,7 +188,13 @@ def cmd_dry_run(args) -> int:
     without making model calls.
     """
     is_pilot = getattr(args, "pilot", False)
-    header_title = "BENCHMARK PILOT DRY-RUN: 4 SEQUENTIAL RUNS (TASK L)" if is_pilot else "BENCHMARK DRY-RUN: 45 PLANNED COUNTERBALANCED RUNS"
+    repetitions = getattr(args, "repetitions", 1) if getattr(args, "repetitions", 0) > 0 else 1
+    schedule = generate_pilot_schedule(repetitions) if is_pilot else generate_schedule(num_reps=3)
+    header_title = (
+        f"BENCHMARK PILOT DRY-RUN: {len(schedule)} SEQUENTIAL RUNS (TASK L, REPS={repetitions})"
+        if is_pilot
+        else "BENCHMARK DRY-RUN: 45 PLANNED COUNTERBALANCED RUNS"
+    )
     print("=" * 80)
     print(header_title)
     print("=" * 80)
@@ -194,7 +205,6 @@ def cmd_dry_run(args) -> int:
     prompts_manifest = load_json(PROMPTS_MANIFEST_FILE)
 
     pi_binary = env_lock.get("pi_binary", "/home/khoa/.local/bin/pi")
-    schedule = generate_pilot_schedule() if is_pilot else generate_schedule(num_reps=3)
 
     if is_pilot:
         print(f"Generated {len(schedule)} planned pilot runs on Task L (Multi-Turn Debugging) across A, P1, P2, P3.\n")
@@ -286,14 +296,23 @@ def run_single_worker(
     shutil.copytree(fixture_dir, ws_dir)
 
     # 2. Session dir setup
-    session_dir = Path(prof.get("session_dir"))
+    # Unique session directory per RUN. Bare -c on a shared profile directory
+    # can continue a different repetition, violating benchmark independence.
+    session_dir = Path(prof.get("session_dir")) / f"{run_id}_{pid}_{tid}_r{rep}"
     session_dir.mkdir(parents=True, exist_ok=True)
 
     # 3. Environment configuration
     env = os.environ.copy()
     env["PI_CODING_AGENT_DIR"] = prof.get("agent_dir")
-    env["PI_CODING_AGENT_SESSION_DIR"] = prof.get("session_dir")
+    env["PI_CODING_AGENT_SESSION_DIR"] = str(session_dir)
     env.pop("PI_OFFLINE", None)
+
+    # 3b. Sift stash isolation
+    if pid == "P1":
+        sift_stash = Path(prof["agent_dir"]) / "sift"
+        if sift_stash.exists():
+            shutil.rmtree(sift_stash, ignore_errors=True)
+        sift_stash.mkdir(parents=True, exist_ok=True)
 
     pi_binary = env_lock.get("pi_binary", "/home/khoa/.local/bin/pi")
     pricing = model_lock.get("pricing", {
@@ -325,7 +344,7 @@ def run_single_worker(
             "--thinking", model_lock.get("thinking", "max"),
             "--mode", "json",
             "-p",
-            "--session-dir", prof.get("session_dir"),
+            "--session-dir", str(session_dir),
         ]
         if t_idx > 0:
             cmd.append("-c")
@@ -391,11 +410,43 @@ def run_single_worker(
                 "events_count": len(turn_events)
             })
 
+            # Detect fatal authentication or quota exhaustion errors
+            combined_err = (stderr_data or "") + " " + " ".join(turn_events)
+            combined_lower = combined_err.lower()
+            is_auth_quota = any(pattern in combined_lower for pattern in [
+                "usage limit",
+                "the usage limit has been reached",
+                "insufficient remaining quota",
+                "insufficient_quota",
+                "quota exceeded",
+                "rate_limit_exceeded",
+                "payment required",
+                "429 too many requests",
+                "unauthorized",
+                "token refresh failed",
+                "authentication failed",
+                "credit balance",
+            ])
+            if is_auth_quota:
+                quota_detail = stderr_data.strip() if stderr_data else "The usage limit has been reached"
+                for ev_str in turn_events:
+                    try:
+                        ev_json = json.loads(ev_str)
+                        msg_err = ev_json.get("message", {}).get("errorMessage")
+                        if msg_err and any(p in msg_err.lower() for p in ["usage limit", "quota", "rate limit"]):
+                            quota_detail = msg_err
+                            break
+                    except Exception:
+                        pass
+                raise AuthOrQuotaError(f"Fatal provider error in turn {t_num} of {run_id}: {quota_detail}")
+
             if last_exit_code != 0:
                 print(f"  WARNING: Turn {t_num} exited with code {last_exit_code}")
                 if stderr_data:
                     print(f"  STDERR: {stderr_data.strip()[:200]}")
 
+        except AuthOrQuotaError:
+            raise
         except Exception as e:
             print(f"  ERROR executing Turn {t_num}: {e}")
             last_exit_code = 1
@@ -403,10 +454,9 @@ def run_single_worker(
 
     run_duration = time.time() - run_start_time
 
-    # Inspect persisted session JSONL in session_dir for any custom extension messages
+    # Inspect persisted session JSONL in session_dir for any custom extension messages and secondary usage
     try:
-        escaped_ws = "--" + str(ws_dir).replace("/", "-").strip("-") + "--"
-        candidate_session_files = list((session_dir / escaped_ws).glob("*.jsonl"))
+        candidate_session_files = list(session_dir.rglob("*.jsonl"))
         if candidate_session_files:
             latest_session_file = max(candidate_session_files, key=lambda f: f.stat().st_mtime)
             with open(latest_session_file, "r", encoding="utf-8") as sf:
@@ -416,7 +466,7 @@ def run_single_worker(
                         continue
                     try:
                         s_data = json.loads(sline)
-                        if s_data.get("type") in ("custom", "custom_message"):
+                        if s_data.get("type") in ("custom", "custom_message", "usage"):
                             collector.process_event(s_data)
                     except json.JSONDecodeError:
                         pass
@@ -462,8 +512,18 @@ def run_single_worker(
         if collector.pruning_events > 0 or collector.secondary_model_requests > 0:
             opt_status = "TRIGGERED"
     elif pid == "P3":
-        if collector.pruning_events > 0 or collector.tool_calls.get("compress", 0) > 0:
+        if collector.pruning_events > 0 or collector.compression_events > 0 or collector.optimizer_tokens_saved > 0:
             opt_status = "TRIGGERED"
+
+    reconciliation_status = "PRIMARY_USAGE_CAPTURED"
+    if pid == "P2":
+        reconciliation_status = (
+            "SECONDARY_USAGE_VERIFIED"
+            if collector.secondary_reported_cost is not None
+            else "SECONDARY_COST_UNVERIFIED"
+        )
+    elif pid == "P3":
+        reconciliation_status = "DCP_EVENTS_VERIFIED"
 
     summary = collector.compute_summary()
     summary["run_id"] = run_id
@@ -474,6 +534,14 @@ def run_single_worker(
     summary["wall_clock_duration_seconds"] = round(run_duration, 2)
     summary["evaluation"] = eval_result
     summary["optimization_status"] = opt_status
+    summary["telemetry_reconciliation_status"] = reconciliation_status
+    summary["session_isolation"] = {
+        "session_dir": str(session_dir),
+        "workspace_dir": str(ws_dir),
+        "agent_dir": prof.get("agent_dir"),
+        "auth_linked_to_main": (Path(prof.get("agent_dir")) / "auth.json").is_symlink()
+        and (Path(prof.get("agent_dir")) / "auth.json").resolve().exists(),
+    }
     summary["turn_summaries"] = turn_summaries
 
     # Save summary
@@ -528,9 +596,10 @@ def generate_pilot_report(results: List[Dict[str, Any]]) -> str:
     lines.append(f"| **Cache-Write Tokens** | {run_a.get('cache_write_tokens', 0):,} | {run_p1.get('cache_write_tokens', 0):,} | {run_p2.get('cache_write_tokens', 0):,} | {run_p3.get('cache_write_tokens', 0):,} |")
     lines.append(f"| **Secondary Requests (Summarizer)** | 0 | 0 | {run_p2.get('secondary_metrics', {}).get('secondary_requests', 0)} | 0 |")
     lines.append(f"| **Secondary Tokens** | 0 | 0 | In: {run_p2.get('secondary_metrics', {}).get('secondary_input_tokens', 0):,}, Out: {run_p2.get('secondary_metrics', {}).get('secondary_output_tokens', 0):,} | 0 |")
-    lines.append(f"| **Secondary Cost** | $0.000000 | $0.000000 | ${run_p2.get('secondary_metrics', {}).get('secondary_cost', 0):.6f} | $0.000000 |")
-    lines.append(f"| **Primary Model Cost** | ${run_a.get('calculated_cost', 0):.6f} | ${run_p1.get('calculated_cost', 0):.6f} | ${run_p2.get('calculated_cost', 0):.6f} | ${run_p3.get('calculated_cost', 0):.6f} |")
-    lines.append(f"| **Net End-to-End Cost** | **${run_a.get('net_end_to_end_cost', run_a.get('calculated_cost', 0)):.6f}** | **${run_p1.get('net_end_to_end_cost', run_p1.get('calculated_cost', 0)):.6f}** | **${run_p2.get('net_end_to_end_cost', run_p2.get('calculated_cost', 0)):.6f}** | **${run_p3.get('net_end_to_end_cost', run_p3.get('calculated_cost', 0)):.6f}** |")
+    lines.append(f"| **Secondary Reported Cost** | 0 | 0 | {run_p2.get('secondary_metrics', {}).get('secondary_cost')} | 0 |")
+    lines.append("| **Primary Pi-Reported Cost** | " + " | ".join(str(r.get("primary_reported_cost")) for r in [run_a, run_p1, run_p2, run_p3]) + " |")
+    lines.append("| **Net Reported Estimate** | " + " | ".join(str(r.get("net_end_to_end_cost")) if r.get("net_end_to_end_cost") is not None else "UNVERIFIED" for r in [run_a, run_p1, run_p2, run_p3]) + " |")
+    lines.append("| **Cost Status** | " + " | ".join(str(r.get("cost_status", "UNVERIFIED")) for r in [run_a, run_p1, run_p2, run_p3]) + " |")
     lines.append(f"| **Wall Duration (s)** | {run_a.get('wall_clock_duration_seconds', 0)}s | {run_p1.get('wall_clock_duration_seconds', 0)}s | {run_p2.get('wall_clock_duration_seconds', 0)}s | {run_p3.get('wall_clock_duration_seconds', 0)}s |")
     lines.append(f"| **Recovery / Retrieve Calls** | 0 | {run_p1.get('optimization_metrics', {}).get('recovery_calls', 0)} | {run_p2.get('optimization_metrics', {}).get('recovery_calls', 0)} | 0 |")
     lines.append("\n---\n")
@@ -544,13 +613,13 @@ def generate_pilot_report(results: List[Dict[str, Any]]) -> str:
 
     lines.append("\n### 3.2 Profile A vs Profile P2 (pi-context-prune)")
     lines.append("- Context Prune uses a batch-based summarizer (`agent-message`) with thinking `low`.")
-    lines.append(f"- Secondary summarizer requests: {run_p2.get('secondary_metrics', {}).get('secondary_requests', 0)} calls, incurring ${run_p2.get('secondary_metrics', {}).get('secondary_cost', 0):.6f} extra model spend.")
-    lines.append(f"- Net end-to-end cost: ${run_p2.get('net_end_to_end_cost', 0):.6f} vs Baseline ${run_a.get('net_end_to_end_cost', 0):.6f}.")
+    lines.append(f"- Secondary summarizer requests: {run_p2.get('secondary_metrics', {}).get('secondary_requests', 0)}. Reported-cost provenance: {run_p2.get('secondary_metrics', {}).get('secondary_cost_provenance') or 'UNAVAILABLE'}.")
+    lines.append(f"- Net end-to-end cost: {run_p2.get('net_end_to_end_cost') if run_p2.get('net_end_to_end_cost') is not None else 'UNVERIFIED'} vs Baseline {run_a.get('net_end_to_end_cost')}.")
 
     lines.append("\n### 3.3 Profile A vs Profile P3 (Pi DCP)")
     lines.append("- Pi DCP applies dynamic deduplication and error purging on `context` events without secondary model calls.")
     lines.append(f"- In this pilot, P3 achieved Peak Context of {run_p3.get('peak_input_context', 0):,} and Cumulative Context of {run_p3.get('cumulative_input_context', 0):,}.")
-    lines.append(f"- Net end-to-end cost: ${run_p3.get('net_end_to_end_cost', 0):.6f} vs Baseline ${run_a.get('net_end_to_end_cost', 0):.6f}.")
+    lines.append(f"- Net end-to-end cost: {run_p3.get('net_end_to_end_cost') if run_p3.get('net_end_to_end_cost') is not None else 'UNVERIFIED'} vs Baseline {run_a.get('net_end_to_end_cost')}.")
 
     lines.append("\n---\n")
     lines.append("## 4. Multi-Criteria Pilot Rankings\n")
@@ -566,8 +635,9 @@ def generate_pilot_report(results: List[Dict[str, Any]]) -> str:
 
     # 2. Cost per task
     lines.append("\n2. **Net End-to-End Cost:**")
-    for r in sorted(ready_runs, key=lambda x: x.get('net_end_to_end_cost', float('inf'))):
-        lines.append(f"   - **{r.get('profile_name')} ({r.get('profile_id')}):** ${r.get('net_end_to_end_cost', 0):.6f}")
+    for r in sorted(ready_runs, key=lambda x: x.get("net_end_to_end_cost") if isinstance(x.get("net_end_to_end_cost"), (int, float)) else float("inf")):
+        c = r.get("net_end_to_end_cost")
+        lines.append(f"   - **{r.get('profile_name')} ({r.get('profile_id')}):** " + (f"${c:.6f}" if isinstance(c, (int, float)) else "UNVERIFIED (exclude from ranking)"))
 
     # 3. Peak Context
     lines.append("\n3. **Peak Input Context (Lowest Window Pressure):**")
@@ -601,7 +671,7 @@ def generate_pilot_report(results: List[Dict[str, Any]]) -> str:
     lines.append("## 6. Recommendations for Full Benchmark Matrix\n")
     lines.append("1. **Single-Repetition Caveat:** These results represent repetition 1 on Task L. Statistical variance across network latency and model reasoning paths requires the full 3-repetition Latin Square matrix before declaring absolute efficiency.\n")
     lines.append("2. **Secondary Model Budgeting:** The secondary model costs in P2 must remain explicitly accounted for in all reporting to prevent masking summarizer overhead.\n")
-    lines.append("3. **Proceed to Full Matrix:** All ready candidates (A, P1, P2, P3) demonstrated runtime compatibility and stability under heavy tool pressure.\n")
+    lines.append("3. **HOLD:** Do not proceed to full matrix until cost provenance and optimizer events have been independently reconciled, and an evaluator with immutable external tests has passed.\n")
 
     content = "\n".join(lines)
     with open(report_file, "w", encoding="utf-8") as f:
@@ -641,23 +711,97 @@ def cmd_run(args) -> int:
     env_lock = load_json(ENV_LOCK_FILE)
     prompts_manifest = load_json(PROMPTS_MANIFEST_FILE)
 
-    schedule = generate_pilot_schedule() if is_pilot else generate_schedule(num_reps=3)
-    print(f"[benchmark run] Running {len(schedule)} sequential sessions ({mode} mode)...\n")
+    repetitions = getattr(args, "repetitions", 0)
+    if is_pilot and repetitions < 1:
+        print("ERROR: specify --repetitions N for fresh pilot; original four-run pilot is immutable.")
+        return 2
+    schedule = generate_pilot_schedule(repetitions) if is_pilot else generate_schedule(num_reps=3)
+    results_target = RESULTS_DIR / (f"pilot-v2-r{repetitions}-results.json" if is_pilot else "benchmark-results.json")
 
-    results = []
-    for item in schedule:
-        res = run_single_worker(item, profiles, model_lock, env_lock, prompts_manifest)
-        results.append(res)
+    retry_until_passed = getattr(args, "retry_until_passed", False)
+    retry_delay = getattr(args, "retry_delay", 60)
+    max_retries = getattr(args, "max_retries", 10)
 
-    # Persist aggregated results
-    results_target = RESULTS_DIR / ("pilot-results.json" if is_pilot else "benchmark-results.json")
-    with open(results_target, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2)
-    print(f"\n[benchmark run] All {len(results)} sessions completed. Results saved to {results_target}")
+    # Resume support: load existing runs if present
+    runs_by_id: Dict[str, Dict[str, Any]] = {}
+    if results_target.exists():
+        try:
+            with open(results_target, "r", encoding="utf-8") as rf:
+                existing_runs = json.load(rf)
+            for r in existing_runs:
+                rid = r.get("run_id")
+                if rid:
+                    runs_by_id[rid] = r
+            passed_count = sum(1 for r in runs_by_id.values() if r.get("evaluation", {}).get("passed") is True)
+            print(f"[benchmark run] Found {len(runs_by_id)} session(s) ({passed_count} passed) in {results_target.name}.")
+        except Exception as e:
+            print(f"[benchmark run] Note reading {results_target}: {e}")
+
+    attempts = 0
+    passed_total = sum(1 for r in runs_by_id.values() if r.get("evaluation", {}).get("passed") is True)
+    while passed_total < len(schedule):
+        attempts += 1
+        runs_in_this_pass = 0
+        quota_blocked = False
+
+        for item in schedule:
+            rid = item["run_id"]
+            if runs_by_id.get(rid, {}).get("evaluation", {}).get("passed") is True:
+                continue
+
+            runs_in_this_pass += 1
+            try:
+                res = run_single_worker(item, profiles, model_lock, env_lock, prompts_manifest)
+                runs_by_id[rid] = res
+                if res.get("evaluation", {}).get("passed") is True:
+                    print(f"[{rid}] Session completed and PASSED.")
+                else:
+                    print(f"[{rid}] Session completed but FAILED independent evaluation (Score: {res.get('evaluation', {}).get('score')}).")
+
+                # Atomically persist updated results after every run
+                accumulated = [runs_by_id[s["run_id"]] for s in schedule if s["run_id"] in runs_by_id]
+                tmp_target = results_target.with_suffix(".tmp")
+                with open(tmp_target, "w", encoding="utf-8") as f:
+                    json.dump(accumulated, f, indent=2)
+                os.replace(tmp_target, results_target)
+                passed_total = sum(1 for r in runs_by_id.values() if r.get("evaluation", {}).get("passed") is True)
+                print(f"[{rid}] Persisted to {results_target.name} ({passed_total}/{len(schedule)} passed).")
+
+            except AuthOrQuotaError as e:
+                quota_blocked = True
+                print(f"\n[FATAL STOP - AUTH/QUOTA ERROR]: {e}")
+                accumulated = [runs_by_id[s["run_id"]] for s in schedule if s["run_id"] in runs_by_id]
+                if accumulated:
+                    tmp_target = results_target.with_suffix(".tmp")
+                    with open(tmp_target, "w", encoding="utf-8") as f:
+                        json.dump(accumulated, f, indent=2)
+                    os.replace(tmp_target, results_target)
+                    print(f"Preserved {len(accumulated)} sessions in {results_target.name}")
+
+                if not retry_until_passed or attempts >= max_retries:
+                    passed_count = sum(1 for r in runs_by_id.values() if r.get("evaluation", {}).get("passed") is True)
+                    print(f"Stopping execution. {passed_count}/{len(schedule)} sessions passed.")
+                    return 10
+
+                print(f"[RETRY WAIT] Quota limit encountered: waiting {retry_delay}s before retry (attempt {attempts}/{max_retries})...")
+                time.sleep(retry_delay)
+                break
+
+        passed_total = sum(1 for r in runs_by_id.values() if r.get("evaluation", {}).get("passed") is True)
+        if not retry_until_passed or (quota_blocked and attempts >= max_retries):
+            break
+
+    results = [runs_by_id[s["run_id"]] for s in schedule if s["run_id"] in runs_by_id]
+    passed_count = sum(1 for r in results if r.get("evaluation", {}).get("passed") is True)
+    print(f"\n[benchmark run] {passed_count}/{len(schedule)} sessions passed ({len(results)} recorded). Results saved to {results_target}")
 
     # Generate analysis report
     if is_pilot:
-        generate_pilot_report(results)
+        report_path = REPORTS_DIR / "PILOT_BENCHMARK_ANALYSIS.md"
+        if report_path.exists():
+            print("Historical pilot report preserved. Generate fresh v2 analysis from new results.")
+        else:
+            generate_pilot_report(results)
 
     return 0
 
@@ -699,17 +843,22 @@ def main():
     dry_parser = subparsers.add_parser("dry-run", help="Print exact CLI and env for planned runs")
     dry_parser.add_argument("--pilot", action="store_true", help="Print 4-run pilot schedule on Task L")
     dry_parser.add_argument("--full", action="store_true", help="Print full 45-run schedule")
+    dry_parser.add_argument("--repetitions", type=int, default=1, help="Pilot repetitions (default: 1)")
 
     # Subcommand: run
     run_parser = subparsers.add_parser("run", help="Execute benchmark runs")
     run_group = run_parser.add_mutually_exclusive_group(required=True)
     run_group.add_argument("--pilot", action="store_true", help="Execute pilot run (subset of matrix)")
     run_group.add_argument("--full", action="store_true", help="Execute full 45-run counterbalanced matrix")
+    run_parser.add_argument("--repetitions", type=int, default=0, help="Fresh Task L pilot repetitions; 3 recommended")
     run_parser.add_argument(
         "--authorize-benchmark-spend",
         action="store_true",
         help="Explicitly authorize monetary spend for commercial model API calls",
     )
+    run_parser.add_argument("--retry-until-passed", action="store_true", help="Retry incomplete/failed sessions until all sessions pass")
+    run_parser.add_argument("--retry-delay", type=int, default=60, help="Delay in seconds between retry attempts when blocked by quota (default: 60)")
+    run_parser.add_argument("--max-retries", type=int, default=10, help="Maximum retry attempts when --retry-until-passed is enabled")
 
     # Subcommand: report
     subparsers.add_parser("report", help="Generate summary reports from results")

@@ -3,6 +3,7 @@ import sys
 import json
 import shutil
 import tempfile
+from pathlib import Path
 import subprocess
 from typing import Dict, Any
 
@@ -64,21 +65,65 @@ def evaluate_task_l(target_dir: str) -> Dict[str, Any]:
                         log_volume_ok = False
                         log_details.append(f"{f}: {fsize} bytes (exceeds 50KB limit)")
 
-        all_passed = test_passed and run_passed and bp_passed and log_volume_ok
+        # Trust only tests owned by the evaluator, not workspace/run_tests.py.
+        # A worker can change workspace tests to make a false PASS.
+        root = Path(__file__).resolve().parent.parent
+        fixture = root / "fixtures" / "task-l"
+        tampered = []
+        for sub in ("run_tests.py", "tests/test_pipeline.py"):
+            original = (fixture / sub)
+            actual = Path(target_dir) / sub
+            if not actual.is_file() or actual.read_bytes() != original.read_bytes():
+                tampered.append(sub)
+        tests_immutable = not tampered
+        ext_test = Path(__file__).resolve().parent / "task_l_hidden_checks.py"
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(dest) + os.pathsep + env.get("PYTHONPATH", "")
+        try:
+            independent = subprocess.run(
+                [sys.executable, str(ext_test)],
+                cwd=dest, env=env, capture_output=True, text=True, timeout=45
+            )
+            independent_passed = independent.returncode == 0
+            independent_output = (independent.stdout + independent.stderr)[-7000:]
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            independent_passed = False
+            independent_output = repr(exc)
+
+        all_passed = bool(
+            test_passed
+            and run_passed
+            and bp_passed
+            and log_volume_ok
+            and independent_passed
+            and tests_immutable
+        )
+
+        score = 1.0 if all_passed else round(
+            0.2 * int(test_passed and tests_immutable)
+            + 0.2 * int(run_passed)
+            + 0.2 * int(bp_passed)
+            + 0.2 * int(log_volume_ok)
+            + 0.2 * int(independent_passed),
+            2,
+        )
+
         details = (
             f"Tests: {'PASS' if test_passed else 'FAIL'}\n{test_output}\n\n"
             f"Run standard: {'PASS' if run_passed else 'FAIL'}\n{run_output}\n\n"
             f"Run backpressure: {'PASS' if bp_passed else 'FAIL'}\n{bp_output}\n\n"
             f"Log volume clean: {'PASS' if log_volume_ok else 'FAIL'}\n"
             + ("\n".join(log_details) if log_details else "All log files < 50KB")
+            + f"\nIndependent frozen tests: {'PASS' if independent_passed else 'FAIL'}\n{independent_output}\n"
+            + f"Workspace tests unmodified: {tests_immutable} {repr(tampered)}"
         )
 
         return {
             "passed": all_passed,
-            "score": 1.0 if all_passed else (
-                0.25 * int(test_passed) + 0.25 * int(run_passed) + 0.25 * int(bp_passed) + 0.25 * int(log_volume_ok)
-            ),
+            "score": score,
             "details": details.strip(),
+            "independent_tests_passed": independent_passed,
+            "workspace_tests_immutable": tests_immutable,
         }
 
 

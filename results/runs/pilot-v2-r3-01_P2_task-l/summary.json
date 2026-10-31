@@ -1,0 +1,164 @@
+{
+  "session_id": "01a181a7-b2a4-700e-91fd-6557673175cc",
+  "model_id": "gpt-6-luna",
+  "provider": "openai-codex",
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "cache_read_tokens": 0,
+  "cache_write_tokens": 0,
+  "total_tokens": 0,
+  "calculated_cost": 0.0,
+  "reported_cost": 0.0,
+  "secondary_metrics": {
+    "secondary_requests": 0,
+    "secondary_input_tokens": 0,
+    "secondary_output_tokens": 0,
+    "secondary_cost": null,
+    "secondary_modeled_cost_at_lock_prices": 0.0,
+    "secondary_cost_provenance": null,
+    "secondary_cache_read_tokens": null,
+    "secondary_cache_write_tokens": null,
+    "secondary_per_request_usage": []
+  },
+  "primary_reported_cost": 0.0,
+  "cost_status": "REPORTED_ESTIMATE",
+  "cost_provenance": {
+    "primary": "pi.message_end.usage.cost.total",
+    "secondary": null,
+    "model_lock_rates": "SCENARIO_ONLY_NOT_PROVIDER_BILLING",
+    "missing_primary_request_costs": 0
+  },
+  "net_end_to_end_cost": 0.0,
+  "optimization_metrics": {
+    "optimization_triggered": false,
+    "pruning_events": 0,
+    "compression_events": 0,
+    "recovery_calls": 0,
+    "optimizer_tokens_saved": 0
+  },
+  "repeated_reads": 0,
+  "context_metrics": {
+    "peak_input_context": 0,
+    "median_input_context": 0.0,
+    "mean_input_context": 0.0,
+    "cumulative_input_context": 0,
+    "model_requests": 4
+  },
+  "peak_input_context": 0,
+  "median_input_context": 0.0,
+  "mean_input_context": 0.0,
+  "cumulative_input_context": 0,
+  "tool_calls": {},
+  "tool_errors": 0,
+  "subagent_calls": 0,
+  "retry_events": 0,
+  "compaction_events": 0,
+  "agent_settled_aborted": false,
+  "assistant_stop_reason": "error",
+  "termination_reason": "provider_quota_exhausted",
+  "exit_code": 0,
+  "timed_out": false,
+  "per_request_usage": [
+    {
+      "seq": 1,
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "request_input_context": 0,
+      "calculated_cost": 0.0,
+      "reported_cost": 0,
+      "model": "gpt-6-luna",
+      "stopReason": "error",
+      "compaction_preceded": false
+    },
+    {
+      "seq": 2,
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "request_input_context": 0,
+      "calculated_cost": 0.0,
+      "reported_cost": 0,
+      "model": "gpt-6-luna",
+      "stopReason": "error",
+      "compaction_preceded": false
+    },
+    {
+      "seq": 3,
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "request_input_context": 0,
+      "calculated_cost": 0.0,
+      "reported_cost": 0,
+      "model": "gpt-6-luna",
+      "stopReason": "error",
+      "compaction_preceded": false
+    },
+    {
+      "seq": 4,
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "request_input_context": 0,
+      "calculated_cost": 0.0,
+      "reported_cost": 0,
+      "model": "gpt-6-luna",
+      "stopReason": "error",
+      "compaction_preceded": false
+    }
+  ],
+  "run_id": "pilot-v2-r3-01",
+  "profile_id": "P2",
+  "profile_name": "context-prune",
+  "task_id": "task-l",
+  "repetition": 3,
+  "wall_clock_duration_seconds": 16.11,
+  "evaluation": {
+    "passed": false,
+    "score": 0.0,
+    "details": "Tests: FAIL\ntest_stage1_stream_and_transform (test_pipeline.TestPipelineEngine.test_stage1_stream_and_transform)\nTest stream chunking and normalization. ... ok\ntest_stage2_buffer_push_various_sizes (test_pipeline.TestPipelineEngine.test_stage2_buffer_push_various_sizes)\nTest buffer handling full and partial chunks. ... ERROR\ntest_stage3_aggregator_out_of_order_backpressure (test_pipeline.TestPipelineEngine.test_stage3_aggregator_out_of_order_backpressure)\nTest aggregator handling chunks arriving out of order under backpressure. ... ERROR\n\n======================================================================\nERROR: test_stage2_buffer_push_various_sizes (test_pipeline.TestPipelineEngine.test_stage2_buffer_push_various_sizes)\nTest buffer handling full and partial chunks.\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/tmpg3o27p3k/task-l/tests/test_pipeline.py\", line 42, in test_stage2_buffer_push_various_sizes\n    self.assertTrue(buf.push(c2))\n                    ~~~~~~~~^^^^\n  File \"/tmp/tmpg3o27p3k/task-l/pipeline_engine/buffer.py\", line 36, in push\n    raise ValueError(f\"Stream chunk mismatch at sequence {chunk.sequence_id}: expected {expected_size}, got {actual_count}\")\nValueError: Stream chunk mismatch at sequence 2: expected 5, got 2\n\n======================================================================\nERROR: test_stage3_aggregator_out_of_order_backpressure (test_pipeline.TestPipelineEngine.test_stage3_aggregator_out_of_order_backpressure)\nTest aggregator handling chunks arriving out of order under backpressure.\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/tmp/tmpg3o27p3k/task-l/tests/test_pipeline.py\", line 51, in test_stage3_aggregator_out_of_order_backpressure\n    agg.ingest(c2)\n    ~~~~~~~~~~^^^^\n  File \"/tmp/tmpg3o27p3k/task-l/pipeline_engine/aggregator.py\", line 36, in ingest\n    raise RuntimeError(\n        f\"Out-of-order chunk received: expected seq {expected_seq}, got {chunk.sequence_id}\"\n    )\nRuntimeError: Out-of-order chunk received: expected seq 1, got 2\n\n----------------------------------------------------------------------\nRan 3 tests in 0.018s\n\nFAILED (errors=2)\n\nRun standard: FAIL\nStarting pipeline processing for 12 items...\n\nPipeline execution failed: Stream chunk mismatch at sequence 3: expected 5, got 2\n\nRun backpressure: FAIL\nStarting pipeline processing for 12 items...\n\nPipeline execution failed: Stream chunk mismatch at sequence 3: expected 5, got 2\n\nLog volume clean: FAIL\npipeline_debug.log: 5783192 bytes (exceeds 50KB limit)\nIndependent frozen tests: FAIL\n===========\nERROR: test_accept_final_partial_various_sizes (__main__.HiddenTaskL.test_accept_final_partial_various_sizes) (n=3)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/khoa/pi-context-lab/evaluators/task_l_hidden_checks.py\", line 42, in test_accept_final_partial_various_sizes\n    self.assertTrue(b.push(chunk(1, n, is_last=True)))\n                    ~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpg3o27p3k/task-l/pipeline_engine/buffer.py\", line 36, in push\n    raise ValueError(f\"Stream chunk mismatch at sequence {chunk.sequence_id}: expected {expected_size}, got {actual_count}\")\nValueError: Stream chunk mismatch at sequence 1: expected 5, got 3\n\n======================================================================\nERROR: test_accept_final_partial_various_sizes (__main__.HiddenTaskL.test_accept_final_partial_various_sizes) (n=4)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/khoa/pi-context-lab/evaluators/task_l_hidden_checks.py\", line 42, in test_accept_final_partial_various_sizes\n    self.assertTrue(b.push(chunk(1, n, is_last=True)))\n                    ~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpg3o27p3k/task-l/pipeline_engine/buffer.py\", line 36, in push\n    raise ValueError(f\"Stream chunk mismatch at sequence {chunk.sequence_id}: expected {expected_size}, got {actual_count}\")\nValueError: Stream chunk mismatch at sequence 1: expected 5, got 4\n\n======================================================================\nERROR: test_backpressure_scrambled (__main__.HiddenTaskL.test_backpressure_scrambled)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/khoa/pi-context-lab/evaluators/task_l_hidden_checks.py\", line 157, in test_backpressure_scrambled\n    a.ingest(chunk(seq, 1))\n    ~~~~~~~~^^^^^^^^^^^^^^^\n  File \"/tmp/tmpg3o27p3k/task-l/pipeline_engine/aggregator.py\", line 36, in ingest\n    raise RuntimeError(\n        f\"Out-of-order chunk received: expected seq {expected_seq}, got {chunk.sequence_id}\"\n    )\nRuntimeError: Out-of-order chunk received: expected seq 1, got 5\n\n======================================================================\nERROR: test_duplicate_in_reorder_buffer (__main__.HiddenTaskL.test_duplicate_in_reorder_buffer)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/khoa/pi-context-lab/evaluators/task_l_hidden_checks.py\", line 138, in test_duplicate_in_reorder_buffer\n    a.ingest(chunk(3, 1))\n    ~~~~~~~~^^^^^^^^^^^^^\n  File \"/tmp/tmpg3o27p3k/task-l/pipeline_engine/aggregator.py\", line 36, in ingest\n    raise RuntimeError(\n        f\"Out-of-order chunk received: expected seq {expected_seq}, got {chunk.sequence_id}\"\n    )\nRuntimeError: Out-of-order chunk received: expected seq 2, got 3\n\n======================================================================\nERROR: test_large_reverse_sequence (__main__.HiddenTaskL.test_large_reverse_sequence)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/khoa/pi-context-lab/evaluators/task_l_hidden_checks.py\", line 150, in test_large_reverse_sequence\n    a.ingest(chunk(n, 1))\n    ~~~~~~~~^^^^^^^^^^^^^\n  File \"/tmp/tmpg3o27p3k/task-l/pipeline_engine/aggregator.py\", line 36, in ingest\n    raise RuntimeError(\n        f\"Out-of-order chunk received: expected seq {expected_seq}, got {chunk.sequence_id}\"\n    )\nRuntimeError: Out-of-order chunk received: expected seq 1, got 16\n\n======================================================================\nERROR: test_no_premature_order (__main__.HiddenTaskL.test_no_premature_order)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/khoa/pi-context-lab/evaluators/task_l_hidden_checks.py\", line 120, in test_no_premature_order\n    a.ingest(chunk(2, 1))\n    ~~~~~~~~^^^^^^^^^^^^^\n  File \"/tmp/tmpg3o27p3k/task-l/pipeline_engine/aggregator.py\", line 36, in ingest\n    raise RuntimeError(\n        f\"Out-of-order chunk received: expected seq {expected_seq}, got {chunk.sequence_id}\"\n    )\nRuntimeError: Out-of-order chunk received: expected seq 1, got 2\n\n======================================================================\nERROR: test_out_of_order (__main__.HiddenTaskL.test_out_of_order)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/khoa/pi-context-lab/evaluators/task_l_hidden_checks.py\", line 106, in test_out_of_order\n    a.ingest(chunk(3, 1))\n    ~~~~~~~~^^^^^^^^^^^^^\n  File \"/tmp/tmpg3o27p3k/task-l/pipeline_engine/aggregator.py\", line 36, in ingest\n    raise RuntimeError(\n        f\"Out-of-order chunk received: expected seq {expected_seq}, got {chunk.sequence_id}\"\n    )\nRuntimeError: Out-of-order chunk received: expected seq 1, got 3\n\n======================================================================\nERROR: test_out_of_order_interleaved (__main__.HiddenTaskL.test_out_of_order_interleaved)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/khoa/pi-context-lab/evaluators/task_l_hidden_checks.py\", line 115, in test_out_of_order_interleaved\n    a.ingest(chunk(seq, 1))\n    ~~~~~~~~^^^^^^^^^^^^^^^\n  File \"/tmp/tmpg3o27p3k/task-l/pipeline_engine/aggregator.py\", line 36, in ingest\n    raise RuntimeError(\n        f\"Out-of-order chunk received: expected seq {expected_seq}, got {chunk.sequence_id}\"\n    )\nRuntimeError: Out-of-order chunk received: expected seq 2, got 4\n\n======================================================================\nERROR: test_pop_order (__main__.HiddenTaskL.test_pop_order)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/khoa/pi-context-lab/evaluators/task_l_hidden_checks.py\", line 99, in test_pop_order\n    b.push(chunk(2, 3, True))\n    ~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpg3o27p3k/task-l/pipeline_engine/buffer.py\", line 36, in push\n    raise ValueError(f\"Stream chunk mismatch at sequence {chunk.sequence_id}: expected {expected_size}, got {actual_count}\")\nValueError: Stream chunk mismatch at sequence 2: expected 5, got 3\n\n======================================================================\nFAIL: test_compact_logging (__main__.HiddenTaskL.test_compact_logging)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/khoa/pi-context-lab/evaluators/task_l_hidden_checks.py\", line 166, in test_compact_logging\n    self.assertLess(p.stat().st_size, 50 * 1024)\n    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 2786478 not less than 51200\n\n----------------------------------------------------------------------\nRan 22 tests in 0.184s\n\nFAILED (failures=1, errors=11)\n\nWorkspace tests unmodified: True []",
+    "independent_tests_passed": false,
+    "workspace_tests_immutable": true
+  },
+  "optimization_status": "NON_TRIGGERED",
+  "telemetry_reconciliation_status": "SECONDARY_COST_UNVERIFIED",
+  "session_isolation": {
+    "session_dir": "/home/khoa/pi-context-lab/sessions/context-prune/pilot-v2-r3-01_P2_task-l_r3",
+    "workspace_dir": "/home/khoa/pi-context-lab/workspaces/pilot-v2-r3-01_P2_task-l_r3",
+    "agent_dir": "/home/khoa/pi-context-lab/agents/context-prune",
+    "auth_linked_to_main": true
+  },
+  "turn_summaries": [
+    {
+      "turn": 1,
+      "duration_seconds": 4.02,
+      "exit_code": 0,
+      "events_count": 12
+    },
+    {
+      "turn": 2,
+      "duration_seconds": 3.94,
+      "exit_code": 0,
+      "events_count": 10
+    },
+    {
+      "turn": 3,
+      "duration_seconds": 3.98,
+      "exit_code": 0,
+      "events_count": 10
+    },
+    {
+      "turn": 4,
+      "duration_seconds": 4.16,
+      "exit_code": 0,
+      "events_count": 10
+    }
+  ],
+  "provider_status": "BLOCKED_BY_PROVIDER_QUOTA",
+  "provider_error": "Codex error: The usage limit has been reached"
+}

@@ -16,7 +16,7 @@ Computes:
 import json
 import statistics
 import threading
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Set
 
 
 class TelemetryCollector:
@@ -49,22 +49,32 @@ class TelemetryCollector:
 
         self.calculated_cost: float = 0.0
         self.reported_cost: float = 0.0
+        self.reported_cost_observed_requests: int = 0
+        self.reported_cost_missing_requests: int = 0
 
         self.tool_calls: Dict[str, int] = {}
         self.tool_errors: int = 0
         self.subagent_calls: int = 0
         self.recovery_calls: int = 0
+        self.repeated_reads: int = 0
+        self.read_paths: Set[str] = set()
 
         # Secondary model metrics (e.g. summarizer in pi-context-prune)
         self.secondary_model_requests: int = 0
         self.secondary_input_tokens: int = 0
         self.secondary_output_tokens: int = 0
-        self.secondary_calculated_cost: float = 0.0
+        self.secondary_calculated_cost: float = 0.0  # Scenario pricing only
+        self.secondary_reported_cost: Optional[float] = None
+        self.secondary_cost_provenance: Optional[str] = None
+        self.secondary_cache_read_tokens: Optional[int] = None
+        self.secondary_cache_write_tokens: Optional[int] = None
+        self.secondary_per_request_usage: List[Dict[str, Any]] = []
 
         # Optimizer activation tracking
         self.pruning_events: int = 0
         self.compression_events: int = 0
         self.optimization_triggered: bool = False
+        self.optimizer_tokens_saved: int = 0
 
         self.retry_events: int = 0
         self.compaction_events: int = 0
@@ -75,6 +85,7 @@ class TelemetryCollector:
         self.timed_out: bool = False
 
         self.per_request_usage: List[Dict[str, Any]] = []
+        self._processed_event_ids: Set[str] = set()
         self._lock = threading.Lock()
 
     def calculate_cost(self, input_tokens: int, output_tokens: int, cache_read: int, cache_write: int) -> float:
@@ -87,8 +98,14 @@ class TelemetryCollector:
         return cost
 
     def process_event(self, event: Dict[str, Any]):
-        """Process a single JSON event emitted by Pi (RPC / JSON mode)."""
+        """Process a single JSON event emitted by Pi (RPC / JSON mode) or recorded in session JSONL."""
         with self._lock:
+            ev_id = event.get("id")
+            if ev_id:
+                if ev_id in self._processed_event_ids:
+                    return
+                self._processed_event_ids.add(ev_id)
+
             event_type = event.get("type")
 
             if event_type == "session":
@@ -116,6 +133,13 @@ class TelemetryCollector:
                         reported_cost_item = cost_val.get("total", 0.0)
                     elif isinstance(cost_val, (int, float)):
                         reported_cost_item = float(cost_val)
+
+                    if isinstance(cost_val, dict) and isinstance(cost_val.get("total"), (int, float)):
+                        self.reported_cost_observed_requests += 1
+                    elif isinstance(cost_val, (int, float)):
+                        self.reported_cost_observed_requests += 1
+                    else:
+                        self.reported_cost_missing_requests += 1
 
                     seq_num = len(self.per_request_usage) + 1
                     compaction_before = self.compaction_events > 0
@@ -168,7 +192,15 @@ class TelemetryCollector:
             elif event_type == "tool_execution_start":
                 t_name = event.get("toolName", "unknown")
                 self.tool_calls[t_name] = self.tool_calls.get(t_name, 0) + 1
-                if t_name == "subagent":
+                if t_name == "read":
+                    args = event.get("args") or {}
+                    r_path = args.get("path")
+                    if r_path:
+                        if r_path in self.read_paths:
+                            self.repeated_reads += 1
+                        else:
+                            self.read_paths.add(r_path)
+                elif t_name == "subagent":
                     self.subagent_calls += 1
                 elif t_name in ("sift_retrieve", "context_tree_query"):
                     self.recovery_calls += 1
@@ -182,26 +214,96 @@ class TelemetryCollector:
                     if details.get("siftCompressed"):
                         self.compression_events += 1
                         self.optimization_triggered = True
+                        ts = int(details.get("tokensSaved") or 0)
+                        if ts > 0:
+                            self.optimizer_tokens_saved += ts
+
+            elif event_type == "usage":
+                # Handle secondary model usage events recorded in session JSONL (e.g. context-prune summarizer)
+                kind = event.get("kind")
+                note = event.get("note") or ""
+                if kind in ("context_prune", "summarizer") or note.startswith("summarizer"):
+                    u = event.get("usage", {})
+                    inp = u.get("input", 0)
+                    out = u.get("output", 0)
+                    cr = u.get("cacheRead", 0)
+                    cw = u.get("cacheWrite", 0)
+                    cost_val = u.get("cost")
+                    reported_cost_item: Optional[float] = None
+                    if isinstance(cost_val, dict) and isinstance(cost_val.get("total"), (int, float)):
+                        reported_cost_item = float(cost_val["total"])
+                    elif isinstance(cost_val, (int, float)):
+                        reported_cost_item = float(cost_val)
+
+                    self.secondary_per_request_usage.append({
+                        "seq": len(self.secondary_per_request_usage) + 1,
+                        "kind": kind,
+                        "provider": event.get("provider"),
+                        "model": event.get("model"),
+                        "input": inp,
+                        "output": out,
+                        "cacheRead": cr,
+                        "cacheWrite": cw,
+                        "reported_cost": reported_cost_item,
+                    })
+
+                    self.secondary_model_requests = len(self.secondary_per_request_usage)
+                    self.secondary_input_tokens = sum(r["input"] for r in self.secondary_per_request_usage)
+                    self.secondary_output_tokens = sum(r["output"] for r in self.secondary_per_request_usage)
+                    self.secondary_cache_read_tokens = sum(r["cacheRead"] for r in self.secondary_per_request_usage)
+                    self.secondary_cache_write_tokens = sum(r["cacheWrite"] for r in self.secondary_per_request_usage)
+                    if all(r["reported_cost"] is not None for r in self.secondary_per_request_usage):
+                        self.secondary_reported_cost = round(sum(r["reported_cost"] for r in self.secondary_per_request_usage), 6)
+                        self.secondary_cost_provenance = "pi.session.usage.context_prune"
+                    self.secondary_calculated_cost = self.calculate_cost(
+                        self.secondary_input_tokens, self.secondary_output_tokens,
+                        self.secondary_cache_read_tokens or 0, self.secondary_cache_write_tokens or 0
+                    )
+                    self.pruning_events = max(self.pruning_events, self.secondary_model_requests)
+                    self.optimization_triggered = True
 
             elif event_type in ("custom", "custom_message"):
-                # Handle custom extension events (e.g. pi-context-prune stats, summaries)
+                # Handle custom extension events (e.g. pi-context-prune stats, summaries, pi-dcp-state)
                 custom_type = event.get("customType") or event.get("name")
                 if custom_type == "context-prune-stats":
                     data = event.get("data", {})
-                    self.secondary_model_requests = data.get("callCount", self.secondary_model_requests)
-                    self.secondary_input_tokens = data.get("totalInputTokens", self.secondary_input_tokens)
-                    self.secondary_output_tokens = data.get("totalOutputTokens", self.secondary_output_tokens)
-                    sec_cost = self.calculate_cost(self.secondary_input_tokens, self.secondary_output_tokens, 0, 0)
-                    self.secondary_calculated_cost = sec_cost
-                    self.pruning_events = max(self.pruning_events, self.secondary_model_requests)
-                    if self.secondary_model_requests > 0:
+                    # These fields are CUMULATIVE snapshots, not deltas.
+                    call_count = int(data.get("callCount") or 0)
+                    inp_tok = int(data.get("totalInputTokens") or 0)
+                    out_tok = int(data.get("totalOutputTokens") or 0)
+                    if not self.secondary_per_request_usage:
+                        self.secondary_model_requests = max(self.secondary_model_requests, call_count)
+                        self.secondary_input_tokens = max(self.secondary_input_tokens, inp_tok)
+                        self.secondary_output_tokens = max(self.secondary_output_tokens, out_tok)
+                        self.secondary_calculated_cost = self.calculate_cost(
+                            self.secondary_input_tokens, self.secondary_output_tokens, 0, 0
+                        )
+                        for key in ("totalCostUSD", "totalCostUsd", "totalCost"):
+                            v = data.get(key)
+                            if isinstance(v, (int, float)) and v >= 0:
+                                if self.secondary_reported_cost is None:
+                                    self.secondary_reported_cost = float(v)
+                                else:
+                                    self.secondary_reported_cost = max(self.secondary_reported_cost, float(v))
+                                self.secondary_cost_provenance = "context-prune-stats." + key
+                                break
+                    self.pruning_events = max(self.pruning_events, call_count, self.secondary_model_requests)
+                    if call_count > 0 or self.secondary_model_requests > 0:
                         self.optimization_triggered = True
                 elif custom_type == "context-prune-summary":
                     self.pruning_events += 1
                     self.optimization_triggered = True
                 elif custom_type == "pi-dcp-state":
-                    self.pruning_events += 1
-                    self.optimization_triggered = True
+                    data = event.get("data", {})
+                    stats = data.get("stats", {})
+                    tools_pruned = int(stats.get("toolsPruned") or 0)
+                    messages_compressed = int(stats.get("messagesCompressed") or 0)
+                    tokens_saved = int(stats.get("totalPruneTokens") or 0)
+                    self.pruning_events = max(self.pruning_events, tools_pruned)
+                    self.compression_events = max(self.compression_events, messages_compressed)
+                    self.optimizer_tokens_saved = max(self.optimizer_tokens_saved, tokens_saved)
+                    if tools_pruned > 0 or messages_compressed > 0 or tokens_saved > 0:
+                        self.optimization_triggered = True
 
             elif event_type == "agent_settled":
                 if event.get("aborted"):
@@ -236,7 +338,30 @@ class TelemetryCollector:
             med = float(statistics.median(contexts)) if contexts else 0.0
             mean_val = float(statistics.mean(contexts)) if contexts else 0.0
             cum_ctx = sum(contexts) if contexts else 0
-            net_cost = self.calculated_cost + self.secondary_calculated_cost
+            # Prior reports wrongly ranked a fixed, speculative price table as
+            # actual cost. Pi's per-request usage.cost.total is the authoritative
+            # *reported estimate*. It is NOT an invoice for an OAuth subscription.
+            primary_cost_verified = (
+                self.reported_cost_observed_requests == len(self.per_request_usage)
+                and self.reported_cost_missing_requests == 0
+                and len(self.per_request_usage) > 0
+            )
+            primary_reported = round(self.reported_cost, 6) if primary_cost_verified else None
+            secondary_cost_verified = (
+                self.secondary_model_requests == 0
+                or self.secondary_reported_cost is not None
+            )
+            net_cost = (
+                round(primary_reported + (self.secondary_reported_cost or 0.0), 6)
+                if primary_cost_verified and secondary_cost_verified else None
+            )
+            cost_status = (
+                "REPORTED_ESTIMATE"
+                if net_cost is not None else (
+                    "PRIMARY_USAGE_COST_MISSING" if not primary_cost_verified
+                    else "SECONDARY_COST_UNVERIFIED"
+                )
+            )
 
             return {
                 "session_id": self.session_id,
@@ -253,15 +378,30 @@ class TelemetryCollector:
                     "secondary_requests": self.secondary_model_requests,
                     "secondary_input_tokens": self.secondary_input_tokens,
                     "secondary_output_tokens": self.secondary_output_tokens,
-                    "secondary_cost": round(self.secondary_calculated_cost, 6),
+                    "secondary_cost": self.secondary_reported_cost,
+                    "secondary_modeled_cost_at_lock_prices": round(self.secondary_calculated_cost, 6),
+                    "secondary_cost_provenance": self.secondary_cost_provenance,
+                    "secondary_cache_read_tokens": self.secondary_cache_read_tokens,
+                    "secondary_cache_write_tokens": self.secondary_cache_write_tokens,
+                    "secondary_per_request_usage": self.secondary_per_request_usage,
                 },
-                "net_end_to_end_cost": round(net_cost, 6),
+                "primary_reported_cost": primary_reported,
+                "cost_status": cost_status,
+                "cost_provenance": {
+                    "primary": "pi.message_end.usage.cost.total",
+                    "secondary": self.secondary_cost_provenance,
+                    "model_lock_rates": "SCENARIO_ONLY_NOT_PROVIDER_BILLING",
+                    "missing_primary_request_costs": self.reported_cost_missing_requests,
+                },
+                "net_end_to_end_cost": net_cost,
                 "optimization_metrics": {
                     "optimization_triggered": self.optimization_triggered,
                     "pruning_events": self.pruning_events,
                     "compression_events": self.compression_events,
                     "recovery_calls": self.recovery_calls,
+                    "optimizer_tokens_saved": self.optimizer_tokens_saved,
                 },
+                "repeated_reads": self.repeated_reads,
                 "context_metrics": {
                     "peak_input_context": peak,
                     "median_input_context": round(med, 1),
